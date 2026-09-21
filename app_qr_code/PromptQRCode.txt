@@ -1,0 +1,42 @@
+ROLE:
+You are a senior R Shiny developer. Generate a complete, runnable R Shiny 
+application based on the specifications below.
+
+--- 1. BUSINESS CONTEXT ---
+- Purpose of the app: "Allow people to generate QR codes usign provided text"
+- Target user: "Non-technical business stakeholders."
+- Key business question the app answers: "How can I generate QR code"
+
+--- 2. DATA ---
+- Data source: "link provided by user or txt file with links provided by user"
+- Data structure / columns: link (chr)"]
+- Expected data size: [e.g., "~10 rows"]
+
+--- 3. FUNCTIONAL REQUIREMENTS ---
+- Inputs (UI controls):
+  - decide yourself
+- Outputs:
+  - decide yourself
+- Interactivity:
+  - decide yourself
+
+--- 4. LAYOUT & DESIGN ---
+- Layout type: decide yourself
+- Theme: decide yourself
+- Aesthetic notes: "Clean, minimal, corporate colors"
+- Responsive: [Yes]
+
+--- 5. TECHNICAL CONSTRAINTS ---
+- Framework: [e.g., "shiny + ggplot2 + DT" / "bslib + plotly"]
+- Single-file app.R 
+- R version compatibility: "R 4.3+"
+- Include comments explaining each block of code.
+- Include a sample dataset or mock data generator so the app runs 
+  immediately.
+
+--- 6. OUTPUT FORMAT ---
+Return the following:
+1. A single, copy-paste-ready `app.R` file.
+2. A short list of required package installations.
+3. Step-by-step instructions to run the app locally.
+4. 3–5 suggestions for future enhancements.

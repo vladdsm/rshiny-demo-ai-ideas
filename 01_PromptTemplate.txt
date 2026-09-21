@@ -1,0 +1,52 @@
+ROLE:
+You are a senior R Shiny developer. Generate a complete, runnable R Shiny 
+application based on the specifications below.
+
+--- 1. BUSINESS CONTEXT ---
+- Purpose of the app: [e.g., "Allow sales managers to explore regional 
+  performance interactively."]
+- Target user: [e.g., "Non-technical business stakeholders."]
+- Key business question the app answers: [e.g., "Which products are 
+  underperforming in Q3?"]
+
+--- 2. DATA ---
+- Data source: [e.g., "CSV file uploaded by user" / "built-in dataset 
+  'mtcars'" / "SQL query" / "API endpoint"]
+- Data structure / columns: [list key columns and types, e.g., 
+  "date (Date), region (chr), sales (num), product (chr)"]
+- Expected data size: [e.g., "~10,000 rows"]
+
+--- 3. FUNCTIONAL REQUIREMENTS ---
+- Inputs (UI controls):
+  - [e.g., "Date range selector"]
+  - [e.g., "Dropdown to filter by region"]
+  - [e.g., "Checkbox group for product categories"]
+- Outputs:
+  - [e.g., "Line chart of sales over time"]
+  - [e.g., "Sortable data table"]
+  - [e.g., "KPI value boxes (total sales, growth %)"]
+- Interactivity:
+  - [e.g., "Charts must update reactively when filters change"]
+  - [e.g., "Clicking a bar drills down into that region"]
+
+--- 4. LAYOUT & DESIGN ---
+- Layout type: [e.g., "sidebarLayout" / "navbarPage" / "fluidRow with 
+  cards"]
+- Theme: [e.g., "bslib 'flatly' theme" / "shinydashboard" / "default"]
+- Aesthetic notes: [e.g., "Clean, minimal, corporate colors"]
+- Responsive: [Yes / No]
+
+--- 5. TECHNICAL CONSTRAINTS ---
+- Framework: [e.g., "shiny + ggplot2 + DT" / "bslib + plotly"]
+- Single-file app.R or modular (ui.R + server.R)? [Specify]
+- R version compatibility: [e.g., "R 4.3+"]
+- Include comments explaining each block of code.
+- Include a sample dataset or mock data generator so the app runs 
+  immediately.
+
+--- 6. OUTPUT FORMAT ---
+Return the following:
+1. A single, copy-paste-ready `app.R` file.
+2. A short list of required package installations.
+3. Step-by-step instructions to run the app locally.
+4. 3–5 suggestions for future enhancements.
