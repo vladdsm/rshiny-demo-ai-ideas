@@ -1,0 +1,44 @@
+ROLE:
+You are a senior R Shiny developer. Generate a complete, runnable R Shiny 
+application based on the specifications below.
+
+--- 1. BUSINESS CONTEXT ---
+- Purpose of the app: "Compare similar products and calculate business case."]
+- Target user: "Non-technical business stakeholders, sales managers who need to convince customers."
+- Key business question the app answers: "Which product is better Microsoft Azure or Amazon WS?"
+
+--- 2. DATA ---
+- Data source: Publicly available price lists of Microsoft Azure and Amazon WS. You have to select
+similar products e.g. hosting services or renting GPU's or VPS.
+- Data structure / columns: according to the data source, prepared
+- Expected data size: unknown
+
+--- 3. FUNCTIONAL REQUIREMENTS ---
+- Inputs (UI controls):
+  - best defined according to the data
+- Outputs:
+  - define best structure yourself
+- Interactivity:
+  - "Charts must update reactively when filters change"
+  - "Clicking a bar drills down into that region"
+
+--- 4. LAYOUT & DESIGN ---
+- Layout type: define best
+- Theme: "bslib 'flatly' theme"
+- Aesthetic notes: "Clean, minimal"]
+- Responsive: Yes
+
+--- 5. TECHNICAL CONSTRAINTS ---
+- Framework: "bslib + plotly"
+- Single-file app.R Yes
+- R version compatibility: "R 4.3+"
+- Include comments explaining each block of code.
+- Include a sample dataset or mock data generator so the app runs 
+  immediately.
+
+--- 6. OUTPUT FORMAT ---
+Return the following:
+1. A single, copy-paste-ready `app.R` file.
+2. A short list of required package installations.
+3. Step-by-step instructions to run the app locally.
+4. 3–5 suggestions for future enhancements.
