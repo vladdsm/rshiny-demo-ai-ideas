@@ -1,0 +1,47 @@
+ROLE:
+You are a senior R Shiny developer. Generate a complete, runnable R Shiny 
+application based on the specifications below.
+
+--- 1. BUSINESS CONTEXT ---
+- Purpose of the app: "Allow users to copy paste or upload any pdf or txt files 
+to allow them find text most common terms and overal text sentiment"
+- Target user: "Non technical users"
+- Key business question the app answers: "Which terms are most frequently used,
+trend detection, checking sentiment index"]
+
+--- 2. DATA ---
+- Data source: "files uploaded by user" / "generate text and store to be used as built-in dataset"
+- Data structure / columns: "pdf file or txt file"
+- Expected data size: "unknown, max 10 MB"
+
+--- 3. FUNCTIONAL REQUIREMENTS ---
+- Inputs (UI controls):
+  - Define your self
+- Outputs:
+  - "World cloud"
+  - "Overal sentiment score"
+  - "Description of purpose and how to use"
+- Interactivity:
+  - "Charts must update reactively when filters change"
+  - "Clicking a term drills down into that region"
+
+--- 4. LAYOUT & DESIGN ---
+- Layout type: define what is best
+- Theme: define yourself
+- Aesthetic notes: "Clean, minimal"
+- Responsive: Yes
+
+--- 5. TECHNICAL CONSTRAINTS ---
+- Framework: define most beautiful solution
+- Single-file app.R Yes
+- R version compatibility: define yourself
+- Include comments explaining each block of code.
+- Include a sample dataset or mock data generator so the app runs 
+  immediately.
+
+--- 6. OUTPUT FORMAT ---
+Return the following:
+1. A single, copy-paste-ready `app.R` file.
+2. A short list of required package installations.
+3. Step-by-step instructions to run the app locally.
+4. 3–5 suggestions for future enhancements.

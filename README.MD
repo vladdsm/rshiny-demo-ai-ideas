@@ -17,10 +17,10 @@ GenAI and LLMs coding ability helping us to develop such prototypes in hours.
 
 Purpose: generate QR code using open-source software
 
-## Word Cloud
+https://github.com/vladdsm/rshiny-demo-ai-ideas/blob/master/app_qr_code/app.R
 
-Purpose: analyze text and extract most used terms
+## Word Cloud and Sentiment Analysis
 
-## Sentiment Analysis
+Purpose: analyze text and extract most used terms. Analyze sentiment of the text
 
-Purpose: analyze sentiment of the text
+https://github.com/vladdsm/rshiny-demo-ai-ideas/blob/master/app_world_cloud/app.R

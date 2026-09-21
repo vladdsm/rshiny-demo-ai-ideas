@@ -1,6 +1,6 @@
 # =============================================================
 # QR Code Generator - R Shiny App (v3)
-# Author: [Your Name]
+# Author: V. Zhbanko
 # Purpose: Generate a styled QR code from user text, with
 #          adjustable size and an optional embedded logo.
 #
