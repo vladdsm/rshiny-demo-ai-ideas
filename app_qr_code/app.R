@@ -1,33 +1,42 @@
 # =============================================================
-# QR Code Generator - R Shiny App (v2)
+# QR Code Generator - R Shiny App (v3)
 # Author: [Your Name]
 # Purpose: Generate a styled QR code from user text, with
 #          adjustable size and an optional embedded logo.
+#
+# v3 fixes:
+#   - Forces error correction level "H" (30%) so logo overlay
+#     does not break scannability.
+#   - Caps logo size at 25% of QR width with a UI warning.
+#   - Increases white halo padding around the logo.
+#   - Renders QR on a fixed 1024px canvas for crisp modules.
 # =============================================================
 
 # --- 1. LOAD LIBRARIES ---------------------------------------
 library(shiny)        # Core Shiny framework
 library(bslib)        # Modern Bootstrap themes
 library(qrcode)       # QR code generation
-library(png)          # Read/write PNG (needed for logo overlay)
-library(magick)       # Image compositing (logo in the middle)
+library(png)          # Read/write PNG
+library(magick)       # Image compositing (logo overlay)
+library(base64enc)    # Inline image embedding in UI
 
 # --- 2. HELPER: Generate QR with optional logo ---------------
 # Renders the QR to a PNG at the requested size. If a logo is
 # provided, it is scaled and composited in the center. A white
-# square is drawn behind the logo to keep the QR scannable.
+# halo is drawn behind the logo to preserve scannability.
 generate_qr_png <- function(text,
-                            size_px = 400,
-                            logo_path = NULL,
-                            logo_scale = 0.20,
+                            size_px    = 400,
+                            logo_path  = NULL,
+                            logo_scale = 0.18,
                             output_file = tempfile(fileext = ".png")) {
   
-  # -- 2a. Build the base QR and render to a high-res PNG --
-  qr <- qrcode::qr_code(text)
+  # -- 2a. Build the base QR with HIGH error correction --
+  # ecc = "H" tolerates up to 30% damage — required for logos.
+  qr <- qrcode::qr_code(text, ecl = "H")
   tmp_qr <- tempfile(fileext = ".png")
   
-  # Render at 2x for crispness, then resize down if needed
-  render_size <- max(size_px, 800)
+  # Render at a large fixed size for crisp module edges
+  render_size <- 1024
   png(tmp_qr, width = render_size, height = render_size,
       bg = "white", res = 96)
   par(mar = c(0, 0, 0, 0))
@@ -40,20 +49,25 @@ generate_qr_png <- function(text,
   if (!is.null(logo_path)) {
     logo <- magick::image_read(logo_path)
     
-    # Scale logo relative to the QR width (default 20%)
-    logo_w <- as.integer(magick::image_info(qr_img)$width * logo_scale)
-    logo   <- magick::image_resize(logo,
-                                   geometry = paste0(logo_w, "x", logo_w))
+    # Hard cap: never let the logo exceed 25% of QR width
+    effective_scale <- min(logo_scale, 0.25)
     
-    # White square behind the logo to preserve contrast
-    pad       <- as.integer(logo_w * 0.12)
+    logo_w <- as.integer(magick::image_info(qr_img)$width * effective_scale)
+    
+    # Preserve aspect ratio of the logo
+    logo <- magick::image_resize(logo, geometry = paste0(logo_w, "x", logo_w))
+    
+    # Re-read actual dimensions after resize
+    info <- magick::image_info(logo)
+    pad  <- as.integer(max(info$width, info$height) * 0.25)
+    
     white_box <- magick::image_blank(
-      width  = logo_w + 2 * pad,
-      height = logo_w + 2 * pad,
+      width  = info$width  + 2 * pad,
+      height = info$height + 2 * pad,
       color  = "white"
     )
     
-    # Composite: QR -> white box -> logo
+    # Composite: QR -> white halo -> logo
     qr_img <- magick::image_composite(qr_img, white_box,
                                       operator = "over",
                                       gravity  = "center")
@@ -108,15 +122,20 @@ ui <- page_sidebar(
     fileInput("logo_file",
               label  = "Embed a logo (PNG / JPG, optional):",
               accept = c(".png", ".jpg", ".jpeg")),
-    helpText("Logo is centered with a white border so the QR ",
+    helpText("Logo is centered with a white halo so the QR ",
              "remains scannable. Recommended: ≥ 200×200 px, ",
              "square, transparent background."),
     
     sliderInput("logo_scale",
                 label = "Logo size (% of QR):",
-                min   = 10, max = 30,
-                value = 20, step = 1,
+                min   = 10, max = 25,
+                value = 18, step = 1,
                 post  = "%"),
+    helpText(style = "color:#b45309;",
+             "⚠️ Values above 25% will break scannability even ",
+             "with high error correction."),
+    
+    uiOutput("logo_warning"),
     
     hr(),
     
@@ -141,7 +160,7 @@ ui <- page_sidebar(
         tags$li("Type a URL or any text in the sidebar."),
         tags$li("Adjust the slider to change the output size (100–1200 px)."),
         tags$li("Optionally upload a square PNG/JPG logo to embed in the center."),
-        tags$li("Control how large the logo appears (10–30% of the QR)."),
+        tags$li("Control how large the logo appears (10–25% of the QR)."),
         tags$li("Preview the result and download it as a PNG.")
       ),
       tags$p(style = "color:#888;",
@@ -166,10 +185,10 @@ server <- function(input, output, session) {
     }
     
     generate_qr_png(
-      text        = input$single_text,
-      size_px     = input$qr_size,
-      logo_path   = logo_path,
-      logo_scale  = input$logo_scale / 100
+      text       = input$single_text,
+      size_px    = input$qr_size,
+      logo_path  = logo_path,
+      logo_scale = input$logo_scale / 100
     )
   })
   
@@ -190,6 +209,20 @@ server <- function(input, output, session) {
       tags$p(style = "color:#888; font-size:13px;",
              paste0("Size: ", input$qr_size, " × ", input$qr_size, " px"))
     )
+  })
+  
+  # Live warning when the user nears the safe logo size limit
+  output$logo_warning <- renderUI({
+    req(input$logo_scale)
+    if (input$logo_scale >= 23) {
+      tags$p(style = "color:#b91c1c; font-size:13px; font-weight:600;",
+             "⚠️ Logo this large may prevent scanning. Test with your phone.")
+    } else if (input$logo_scale >= 20) {
+      tags$p(style = "color:#b45309; font-size:13px;",
+             "Heads-up: large logos reduce reliability on older scanners.")
+    } else {
+      NULL
+    }
   })
   
   # Flag for the conditional download button
