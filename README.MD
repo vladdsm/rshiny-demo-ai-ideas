@@ -24,3 +24,9 @@ https://github.com/vladdsm/rshiny-demo-ai-ideas/blob/master/app_qr_code/app.R
 Purpose: analyze text and extract most used terms. Analyze sentiment of the text
 
 https://github.com/vladdsm/rshiny-demo-ai-ideas/blob/master/app_world_cloud/app.R
+
+## Business case and Sales Discovery Applications
+
+Purpose: help to analyze products of competitors [draft]
+
+https://github.com/vladdsm/rshiny-demo-ai-ideas/blob/master/app_business_case/app.R
