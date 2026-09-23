@@ -1,13 +1,15 @@
 # =============================================================
-# Industrial Equipment TCO Comparison — R Shiny App (v2)
+# Industrial Equipment TCO Comparison — R Shiny App (v3)
 # Author: [Your Name]
 # Purpose: Compare Mazak VCN-530C vs Okuma GENOS M560-V on
-#          5-year TCO, with adjustable design advantages.
+#          5-year TCO. Accounts for motor efficiency differences
+#          and design-driven maintenance savings.
 #
-# v2 changes:
-#   - Top-of-app control bar (no scrolling needed)
-#   - Design advantage sliders (maintenance discount per machine)
-#   - Fixed drill-down table
+# v3 changes:
+#   - Common parameters moved to sidebar
+#   - Distinctive parameters (price, efficiency, design) at top
+#   - New "energy efficiency" slider per machine
+#   - New energy gap visualization
 # =============================================================
 
 # --- 1. LOAD LIBRARIES ---------------------------------------
@@ -22,18 +24,18 @@ library(scales)
 
 # --- 2. MACHINE SPECIFICATIONS -------------------------------
 machines <- tibble::tribble(
-  ~machine,            ~manufacturer, ~x_travel, ~y_travel, ~z_travel,
-  ~table_size,         ~spindle_rpm,  ~spindle_kw, ~tool_capacity,
-  ~weight_kg,          ~rapid_rate,   ~chip_to_chip,
-  ~price_low,          ~price_high,   ~design_advantage,
-  "VCN-530C",          "Mazak",       1050,      530,       510,
-  "1300 x 550 mm",     12000,         22,          30,
-  7500,                42,            1.3,
-  123000,              150000,        "C-frame design",
-  "GENOS M560-V",      "Okuma",       1050,      560,       460,
-  "1300 x 560 mm",     15000,         22,          32,
-  9000,                40,            1.8,
-  140000,              190000,        "Double-column design"
+  ~machine,        ~manufacturer, ~x_travel, ~y_travel, ~z_travel,
+  ~table_size,     ~spindle_rpm,  ~spindle_kw, ~tool_capacity,
+  ~weight_kg,      ~rapid_rate,   ~chip_to_chip,
+  ~price_low,      ~price_high,   ~design_note,
+  "VCN-530C",      "Mazak",       1050,      530,       510,
+  "1300 x 550 mm", 12000,         22,          30,
+  7500,            42,            1.3,
+  123000,          150000,        "C-frame design",
+  "GENOS M560-V",  "Okuma",       1050,      560,       460,
+  "1300 x 560 mm", 15000,         22,          32,
+  9000,            40,            1.8,
+  140000,          190000,        "Double-column design"
 )
 
 # --- 3. USER INTERFACE ---------------------------------------
@@ -46,121 +48,177 @@ ui <- page_fluid(
     base_font  = font_google("Inter")
   ),
   
-  # ---------- Top Header ----------
+  # ---------- Header ----------
   div(
-    style = "padding: 12px 20px; background: linear-gradient(90deg,#0d3b66,#1d5fa8); color:#fff; border-radius:8px; margin-bottom:12px;",
+    style = paste0("padding:12px 20px; ",
+                   "background:linear-gradient(90deg,#0d3b66,#1d5fa8); ",
+                   "color:#fff; border-radius:8px; margin-bottom:12px;"),
     h3(style = "margin:0;", "⚙️ Machine TCO Comparison — Mazak vs Okuma")
   ),
   
-  # ---------- Top Control Bar (all key sliders) ----------
-  card(
-    style = "margin-bottom:12px;",
-    card_body(
-      layout_column_wrap(
-        width = 1/4,
-        gap  = "10px",
-        
-        # Column 1: Purchase prices
-        div(
-          tags$b("Purchase Price", style = "color:#0d3b66;"),
-          sliderInput("mazak_price", "Mazak ($K):",
-                      min = 100, max = 200, value = 130, step = 5, post = "K"),
-          sliderInput("okuma_price", "Okuma ($K):",
-                      min = 120, max = 220, value = 165, step = 5, post = "K")
+  # ---------- Layout: Sidebar (common) + Main (distinctive) ----------
+  layout_sidebar(
+    
+    # =========================================================
+    # SIDEBAR: Common parameters shared by both machines
+    # =========================================================
+    sidebar = sidebar(
+      width = 300,
+      open  = "open",
+      
+      h5("🔧 Common Parameters", style = "color:#0d3b66;"),
+      
+      tags$b("Operation"),
+      sliderInput("hours_year", "Operating hours / year:",
+                  min = 1000, max = 6000, value = 4000, step = 100),
+      sliderInput("utilization", "Utilization rate (%):",
+                  min = 30, max = 95, value = 70, step = 5, post = "%"),
+      
+      hr(),
+      
+      tags$b("Costs"),
+      sliderInput("labor_rate", "Operator rate ($/hr):",
+                  min = 15, max = 60, value = 28, step = 1, pre = "$"),
+      sliderInput("maintenance_pct", "Base maintenance (% of price):",
+                  min = 2, max = 8, value = 4, step = 0.5, post = "%"),
+      sliderInput("tooling_hr", "Tooling & consumables ($/hr):",
+                  min = 1, max = 30, value = 8, step = 1, pre = "$"),
+      numericInput("electricity", "Electricity price ($/kWh):",
+                   value = 0.12, min = 0.05, max = 0.30, step = 0.01),
+      
+      hr(),
+      
+      tags$b("Financial"),
+      sliderInput("discount_rate", "Discount rate (%):",
+                  min = 0, max = 15, value = 8, step = 0.5, post = "%"),
+      sliderInput("residual_pct", "Residual value after 5 yrs (%):",
+                  min = 20, max = 60, value = 40, step = 5, post = "%"),
+      
+      hr(),
+      
+      downloadButton("dl_report", "Download report (CSV)",
+                     class = "btn-primary w-100")
+    ),
+    
+    # =========================================================
+    # MAIN PANEL
+    # =========================================================
+    div(
+      
+      # ---------- TOP: Distinctive parameters per machine ----------
+      card(
+        style = "margin-bottom:12px; border-top:4px solid #e76f51;",
+        card_header(
+          tags$div(
+            style = "display:flex; align-items:center; gap:8px;",
+            tags$span("🎯"),
+            tags$b("Distinctive Parameters"),
+            tags$span(style = "color:#888; font-size:12px;",
+                      "(unique to each machine)")
+          )
         ),
-        
-        # Column 2: Operating assumptions
-        div(
-          tags$b("Operating", style = "color:#0d3b66;"),
-          sliderInput("hours_year", "Hours / year:",
-                      min = 1000, max = 6000, value = 4000, step = 100),
-          sliderInput("utilization", "Utilization (%):",
-                      min = 30, max = 95, value = 70, step = 5, post = "%")
-        ),
-        
-        # Column 3: Cost assumptions
-        div(
-          tags$b("Costs", style = "color:#0d3b66;"),
-          sliderInput("labor_rate", "Labor ($/hr):",
-                      min = 15, max = 60, value = 28, step = 1, pre = "$"),
-          sliderInput("maintenance_pct", "Maintenance (%):",
-                      min = 2, max = 8, value = 4, step = 0.5, post = "%")
-        ),
-        
-        # Column 4: Design advantage (NEW)
-        div(
-          tags$b("Design Advantage", style = "color:#e76f51;"),
-          sliderInput("mazak_maint_disc", "Mazak maint. discount (%):",
-                      min = 0, max = 40, value = 0, step = 1, post = "%"),
-          sliderInput("okuma_maint_disc", "Okuma maint. discount (%):",
-                      min = 0, max = 40, value = 20, step = 1, post = "%"),
-          helpText(style = "font-size:11px; color:#888; margin-top:-10px;",
-                   "Reflects design-driven savings (e.g., double-column rigidity).")
+        card_body(
+          layout_column_wrap(
+            width = 1/2,
+            gap  = "16px",
+            
+            # ---- Mazak card ----
+            card(
+              style = "border-left:5px solid #0d3b66; background:#f8faff;",
+              card_body(
+                h5("Mazak VCN-530C", style = "color:#0d3b66; margin-top:0;"),
+                sliderInput("mazak_price", "Purchase price ($K):",
+                            min = 100, max = 200, value = 130, step = 5,
+                            post = "K"),
+                sliderInput("mazak_power_kw", "Average power draw (kW):",
+                            min = 10, max = 60, value = 35, step = 1,
+                            post = " kW"),
+                sliderInput("mazak_efficiency", "Motor efficiency (%):",
+                            min = 70, max = 100, value = 88, step = 1,
+                            post = "%"),
+                sliderInput("mazak_maint_disc", "Design maintenance saving (%):",
+                            min = 0, max = 40, value = 0, step = 1,
+                            post = "%"),
+                helpText(style = "font-size:11px; color:#666;",
+                         "Design note: ", machines$design_note[1])
+              )
+            ),
+            
+            # ---- Okuma card ----
+            card(
+              style = "border-left:5px solid #e76f51; background:#fff8f5;",
+              card_body(
+                h5("Okuma GENOS M560-V", style = "color:#e76f51; margin-top:0;"),
+                sliderInput("okuma_price", "Purchase price ($K):",
+                            min = 120, max = 220, value = 165, step = 5,
+                            post = "K"),
+                sliderInput("okuma_power_kw", "Average power draw (kW):",
+                            min = 10, max = 60, value = 30, step = 1,
+                            post = " kW"),
+                sliderInput("okuma_efficiency", "Motor efficiency (%):",
+                            min = 70, max = 100, value = 94, step = 1,
+                            post = "%"),
+                sliderInput("okuma_maint_disc", "Design maintenance saving (%):",
+                            min = 0, max = 40, value = 20, step = 1,
+                            post = "%"),
+                helpText(style = "font-size:11px; color:#666;",
+                         "Design note: ", machines$design_note[2])
+              )
+            )
+          ),
+          
+          # Live efficiency comparison strip
+          uiOutput("efficiency_strip")
         )
       ),
       
-      # Secondary row: financial + tooling
-      layout_column_wrap(
-        width = 1/5,
-        gap  = "10px",
-        numericInput("electricity", "Electricity ($/kWh):",
-                     value = 0.12, min = 0.05, max = 0.30, step = 0.01),
-        sliderInput("tooling_hr", "Tooling ($/hr):",
-                    min = 1, max = 30, value = 8, step = 1, pre = "$"),
-        sliderInput("discount_rate", "Discount rate (%):",
-                    min = 0, max = 15, value = 8, step = 0.5, post = "%"),
-        sliderInput("residual_pct", "Residual value (%):",
-                    min = 20, max = 60, value = 40, step = 5, post = "%"),
-        div(
-          style = "display:flex; align-items:flex-end;",
-          downloadButton("dl_report", "Download report",
-                         class = "btn-primary w-100")
+      # ---------- Tabs ----------
+      navset_card_tab(
+        id = "main_tabs",
+        
+        # ---- Tab 1: Executive Summary ----
+        nav_panel(
+          "Executive Summary",
+          br(),
+          uiOutput("summary_boxes"),
+          br(),
+          card(
+            card_header("Recommendation"),
+            card_body(uiOutput("recommendation_text"))
+          )
+        ),
+        
+        # ---- Tab 2: TCO Breakdown ----
+        nav_panel(
+          "TCO Breakdown",
+          br(),
+          plotlyOutput("tco_stacked", height = "420px"),
+          br(),
+          DTOutput("tco_table")
+        ),
+        
+        # ---- Tab 3: Sensitivity ----
+        nav_panel(
+          "Sensitivity",
+          br(),
+          plotlyOutput("sensitivity_chart", height = "400px"),
+          br(),
+          layout_column_wrap(
+            width = 1/2,
+            plotlyOutput("energy_gap", height = "320px"),
+            plotlyOutput("maint_gap", height = "320px")
+          )
+        ),
+        
+        # ---- Tab 4: Specs & Drill-down ----
+        nav_panel(
+          "Specs & Drill-down",
+          br(),
+          uiOutput("drill_header"),
+          br(),
+          DTOutput("specs_table")
         )
       )
-    )
-  ),
-  
-  # ---------- Main Tabs ----------
-  navset_card_tab(
-    id = "main_tabs",
-    
-    # ---- Tab 1: Executive Summary ----
-    nav_panel(
-      "Executive Summary",
-      br(),
-      uiOutput("summary_boxes"),
-      br(),
-      card(
-        card_header("Recommendation"),
-        card_body(uiOutput("recommendation_text"))
-      )
-    ),
-    
-    # ---- Tab 2: TCO Breakdown ----
-    nav_panel(
-      "TCO Breakdown",
-      br(),
-      plotlyOutput("tco_stacked", height = "420px"),
-      br(),
-      DTOutput("tco_table")
-    ),
-    
-    # ---- Tab 3: Sensitivity ----
-    nav_panel(
-      "Sensitivity",
-      br(),
-      plotlyOutput("sensitivity_chart", height = "420px"),
-      br(),
-      plotlyOutput("utilization_gap", height = "320px")
-    ),
-    
-    # ---- Tab 4: Specs & Drill-down ----
-    nav_panel(
-      "Specs & Drill-down",
-      br(),
-      uiOutput("drill_header"),
-      br(),
-      DTOutput("specs_table")
     )
   )
 )
@@ -171,59 +229,91 @@ server <- function(input, output, session) {
   # ---------- Reactive: TCO calculation ----------
   calculate_tco <- reactive({
     
-    hours <- input$hours_year * (input$utilization / 100)
-    years <- 5
-    dr    <- input$discount_rate / 100
-    
-    # Discount factor sum for 5 years
+    hours    <- input$hours_year * (input$utilization / 100)
+    years    <- 5
+    dr       <- input$discount_rate / 100
     disc_sum <- sum(1 / (1 + dr)^(1:years))
     
-    compute_machine <- function(name, price, maint_discount) {
+    compute_machine <- function(name, price, power_kw, efficiency_pct,
+                                maint_disc) {
       
-      # Effective maintenance percentage after design advantage
-      eff_maint_pct <- input$maintenance_pct * (1 - maint_discount / 100)
+      # --- Energy: power draw adjusted by motor efficiency ---
+      # Effective consumption = nominal power / (efficiency/100)
+      effective_kw <- power_kw / (efficiency_pct / 100)
+      energy_annual <- effective_kw * hours * input$electricity
       
-      # Annual costs
-      maint_annual   <- price * (eff_maint_pct / 100)
-      tooling_annual <- input$tooling_hr * hours
-      labor_annual   <- input$labor_rate * hours
-      energy_annual  <- (hours * 20) * input$electricity
+      # --- Maintenance: base % reduced by design advantage ---
+      eff_maint_pct <- input$maintenance_pct * (1 - maint_disc / 100)
+      maint_annual  <- price * (eff_maint_pct / 100)
+      
+      # --- Other annual costs ---
+      tooling_annual  <- input$tooling_hr * hours
+      labor_annual    <- input$labor_rate * hours
       downtime_annual <- hours * 0.02 * input$labor_rate * 1.5
       
-      # Discounted totals
-      maint_disc   <- maint_annual   * disc_sum
+      # --- Discounted totals ---
+      energy_disc  <- energy_annual  * disc_sum
+      maint_disc_v <- maint_annual   * disc_sum
       tooling_disc <- tooling_annual * disc_sum
       labor_disc   <- labor_annual   * disc_sum
-      energy_disc  <- energy_annual  * disc_sum
       down_disc    <- downtime_annual * disc_sum
       
       residual <- price * (input$residual_pct / 100) / (1 + dr)^years
       
-      tco <- price + maint_disc + tooling_disc + labor_disc +
-        energy_disc + down_disc - residual
+      tco <- price + energy_disc + maint_disc_v + tooling_disc +
+        labor_disc + down_disc - residual
       
       tibble(
-        machine      = name,
-        purchase     = price,
-        maintenance  = maint_disc,
-        tooling      = tooling_disc,
-        labor        = labor_disc,
-        energy       = energy_disc,
-        downtime     = down_disc,
-        residual     = -residual,
-        total_tco    = tco,
-        annual_hours = hours,
-        cost_per_hr  = tco / (hours * years)
+        machine        = name,
+        purchase       = price,
+        energy         = energy_disc,
+        maintenance    = maint_disc_v,
+        tooling        = tooling_disc,
+        labor          = labor_disc,
+        downtime       = down_disc,
+        residual       = -residual,
+        total_tco      = tco,
+        annual_hours   = hours,
+        cost_per_hr    = tco / (hours * years),
+        effective_kw   = effective_kw,
+        energy_annual  = energy_annual
       )
     }
     
     bind_rows(
       compute_machine("Mazak VCN-530C",
                       input$mazak_price * 1000,
+                      input$mazak_power_kw,
+                      input$mazak_efficiency,
                       input$mazak_maint_disc),
       compute_machine("Okuma GENOS M560-V",
                       input$okuma_price * 1000,
+                      input$okuma_power_kw,
+                      input$okuma_efficiency,
                       input$okuma_maint_disc)
+    )
+  })
+  
+  # ---------- Efficiency strip (live feedback under sliders) ----------
+  output$efficiency_strip <- renderUI({
+    df <- calculate_tco()
+    mazak_kw  <- df$effective_kw[1]
+    okuma_kw  <- df$effective_kw[2]
+    delta_kw  <- mazak_kw - okuma_kw
+    delta_pct <- (delta_kw / mazak_kw) * 100
+    
+    winner <- if (delta_kw > 0) "Okuma" else "Mazak"
+    
+    div(
+      style = paste0("margin-top:10px; padding:10px 14px; ",
+                     "border-radius:8px; background:#eef4fb; ",
+                     "border-left:4px solid #1d5fa8;"),
+      tags$b("Live efficiency comparison: "),
+      paste0("Mazak ", round(mazak_kw, 1), " kW vs Okuma ",
+             round(okuma_kw, 1), " kW effective — "),
+      tags$b(style = "color:#0d3b66;",
+             paste0(winner, " consumes ", round(abs(delta_pct), 1),
+                    "% less power."))
     )
   })
   
@@ -259,35 +349,39 @@ server <- function(input, output, session) {
     df <- calculate_tco()
     cheaper <- if (df$total_tco[1] < df$total_tco[2]) "Mazak VCN-530C" else "Okuma GENOS M560-V"
     diff    <- abs(df$total_tco[1] - df$total_tco[2])
+    energy_saving <- abs(df$energy[1] - df$energy[2])
     
     tags$div(
       tags$h4(paste0("📌 ", cheaper, " delivers the lower 5-year TCO.")),
       tags$p(paste0("Estimated advantage: $", format(round(diff), big.mark = ","),
-                    " over 5 years ($", format(round(diff/5), big.mark = ","), " per year).")),
+                    " over 5 years ($", format(round(diff/5), big.mark = ","),
+                    " per year).")),
+      tags$p(paste0("Energy cost difference alone: $",
+                    format(round(energy_saving), big.mark = ","),
+                    " over 5 years — driven by motor efficiency and power draw.")),
       tags$p(style = "color:#666;",
-             "Design advantage sliders let you reflect structural benefits ",
-             "(e.g., Okuma's double-column rigidity reducing maintenance). ",
-             "Adjust them to see how the conclusion changes.")
+             "Adjust power draw and efficiency sliders at the top to ",
+             "reflect real-world motor performance.")
     )
   })
   
   # ---------- TCO stacked bar ----------
   output$tco_stacked <- renderPlotly({
     df <- calculate_tco() %>%
-      select(machine, purchase, maintenance, tooling, labor,
-             energy, downtime, residual) %>%
+      select(machine, purchase, energy, maintenance, tooling,
+             labor, downtime, residual) %>%
       pivot_longer(-machine, names_to = "component", values_to = "cost")
     
     df$component <- factor(df$component,
-                           levels = c("purchase", "maintenance", "tooling", "labor",
-                                      "energy", "downtime", "residual"),
-                           labels = c("Purchase", "Maintenance", "Tooling", "Labor",
-                                      "Energy", "Downtime", "Residual (-)")
+                           levels = c("purchase", "energy", "maintenance", "tooling",
+                                      "labor", "downtime", "residual"),
+                           labels = c("Purchase", "Energy", "Maintenance", "Tooling",
+                                      "Labor", "Downtime", "Residual (-)")
     )
     
-    colors <- c("Purchase" = "#0d3b66", "Maintenance" = "#e76f51",
-                "Tooling" = "#2a9d8f", "Labor" = "#264653",
-                "Energy" = "#f4a261", "Downtime" = "#e9c46a",
+    colors <- c("Purchase" = "#0d3b66", "Energy" = "#f4a261",
+                "Maintenance" = "#e76f51", "Tooling" = "#2a9d8f",
+                "Labor" = "#264653", "Downtime" = "#e9c46a",
                 "Residual (-)" = "#a8dadc")
     
     plot_ly(df, x = ~machine, y = ~cost, color = ~component,
@@ -307,16 +401,16 @@ server <- function(input, output, session) {
   output$tco_table <- renderDT({
     df <- calculate_tco() %>%
       transmute(
-        Machine       = machine,
-        Purchase      = dollar(purchase),
-        Maintenance   = dollar(maintenance),
-        Tooling       = dollar(tooling),
-        Labor         = dollar(labor),
-        Energy        = dollar(energy),
-        Downtime      = dollar(downtime),
-        `Residual (-)`= dollar(residual),
-        `Total TCO`   = dollar(total_tco),
-        `Cost / Hour` = dollar(cost_per_hr)
+        Machine        = machine,
+        Purchase       = dollar(purchase),
+        Energy         = dollar(energy),
+        Maintenance    = dollar(maintenance),
+        Tooling        = dollar(tooling),
+        Labor          = dollar(labor),
+        Downtime       = dollar(downtime),
+        `Residual (-)` = dollar(residual),
+        `Total TCO`    = dollar(total_tco),
+        `Cost / Hour`  = dollar(cost_per_hr)
       )
     
     datatable(df, rownames = FALSE,
@@ -332,21 +426,25 @@ server <- function(input, output, session) {
       dr    <- input$discount_rate / 100
       disc_sum <- sum(1 / (1 + dr)^(1:5))
       
-      calc_one <- function(price, maint_disc) {
+      calc_one <- function(price, power_kw, efficiency, maint_disc) {
+        eff_kw   <- power_kw / (efficiency / 100)
+        energy   <- eff_kw * hours * input$electricity * disc_sum
         eff_pct  <- input$maintenance_pct * (1 - maint_disc / 100)
         maint    <- price * (eff_pct / 100) * disc_sum
         tooling  <- input$tooling_hr * hours * disc_sum
         labor    <- input$labor_rate * hours * disc_sum
-        energy   <- hours * 20 * input$electricity * disc_sum
         downtime <- hours * 0.02 * input$labor_rate * 1.5 * disc_sum
         residual <- price * (input$residual_pct / 100) / (1 + dr)^5
-        (price + maint + tooling + labor + energy + downtime - residual) / (hours * 5)
+        (price + energy + maint + tooling + labor + downtime - residual) /
+          (hours * 5)
       }
       
       tibble(
         utilization = u,
-        Mazak = calc_one(input$mazak_price * 1000, input$mazak_maint_disc),
-        Okuma = calc_one(input$okuma_price * 1000, input$okuma_maint_disc)
+        Mazak = calc_one(input$mazak_price * 1000, input$mazak_power_kw,
+                         input$mazak_efficiency, input$mazak_maint_disc),
+        Okuma = calc_one(input$okuma_price * 1000, input$okuma_power_kw,
+                         input$okuma_efficiency, input$okuma_maint_disc)
       )
     }) %>% bind_rows()
     
@@ -364,39 +462,55 @@ server <- function(input, output, session) {
       )
   })
   
-  # ---------- Utilization gap (design advantage impact) ----------
-  output$utilization_gap <- renderPlotly({
+  # ---------- Energy gap ----------
+  output$energy_gap <- renderPlotly({
     util_seq <- seq(30, 95, by = 5)
+    dr <- input$discount_rate / 100
+    disc_sum <- sum(1 / (1 + dr)^(1:5))
     
     gap <- lapply(util_seq, function(u) {
       hours <- input$hours_year * (u / 100)
-      dr    <- input$discount_rate / 100
-      disc_sum <- sum(1 / (1 + dr)^(1:5))
-      
-      calc_maint <- function(price, maint_disc) {
-        eff_pct <- input$maintenance_pct * (1 - maint_disc / 100)
-        price * (eff_pct / 100) * disc_sum
-      }
-      
+      mazak_kw <- input$mazak_power_kw / (input$mazak_efficiency / 100)
+      okuma_kw <- input$okuma_power_kw / (input$okuma_efficiency / 100)
       tibble(
         utilization = u,
-        Mazak = calc_maint(input$mazak_price * 1000, input$mazak_maint_disc),
-        Okuma = calc_maint(input$okuma_price * 1000, input$okuma_maint_disc),
+        Mazak = mazak_kw * hours * input$electricity * disc_sum,
+        Okuma = okuma_kw * hours * input$electricity * disc_sum,
         Gap   = Mazak - Okuma
       )
     }) %>% bind_rows()
     
     plot_ly(gap, x = ~utilization, y = ~Gap, type = "bar",
-            marker = list(color = ifelse(gap$Gap > 0, "#0d3b66", "#e76f51")),
+            marker = list(color = ifelse(gap$Gap > 0, "#e76f51", "#0d3b66")),
             hovertemplate = "Gap: $%{y:,.0f}<extra></extra>") %>%
       layout(
-        title = "Maintenance Cost Gap (Mazak - Okuma)",
-        xaxis = list(title = "Utilization Rate (%)"),
-        yaxis = list(title = "5-Year Maintenance Gap ($)", tickformat = "$,.0f")
+        title = "5-Year Energy Cost Gap (Mazak - Okuma)",
+        xaxis = list(title = "Utilization (%)"),
+        yaxis = list(title = "Energy Gap ($)", tickformat = "$,.0f")
       )
   })
   
-  # ---------- Drill-down: fixed specs table ----------
+  # ---------- Maintenance gap ----------
+  output$maint_gap <- renderPlotly({
+    df <- calculate_tco()
+    gap <- df$maintenance[1] - df$maintenance[2]
+    
+    plot_ly(
+      x = c("Mazak", "Okuma"),
+      y = c(df$maintenance[1], df$maintenance[2]),
+      type = "bar",
+      marker = list(color = c("#0d3b66", "#e76f51")),
+      hovertemplate = "%{x}: $%{y:,.0f}<extra></extra>"
+    ) %>%
+      layout(
+        title = paste0("5-Year Maintenance (gap: $",
+                       format(round(gap), big.mark = ","), ")"),
+        xaxis = list(title = ""),
+        yaxis = list(title = "USD", tickformat = "$,.0f")
+      )
+  })
+  
+  # ---------- Drill-down: specs table ----------
   output$drill_header <- renderUI({
     tags$div(
       style = "padding:14px; border-radius:10px; background:#f7fafc;",
@@ -407,28 +521,16 @@ server <- function(input, output, session) {
   })
   
   output$specs_table <- renderDT({
-    
-    # Build specification rows manually to avoid pivot errors
     spec_rows <- tibble(
       Specification = c(
-        "Manufacturer",
-        "Design",
-        "X Travel (mm)",
-        "Y Travel (mm)",
-        "Z Travel (mm)",
-        "Table Size",
-        "Spindle Speed (RPM)",
-        "Spindle Power (kW)",
-        "Tool Capacity",
-        "Weight (kg)",
-        "Rapid Rate (m/min)",
-        "Chip-to-Chip (sec)",
-        "Price Low ($)",
-        "Price High ($)"
+        "Manufacturer", "Design", "X Travel (mm)", "Y Travel (mm)",
+        "Z Travel (mm)", "Table Size", "Spindle Speed (RPM)",
+        "Spindle Power (kW)", "Tool Capacity", "Weight (kg)",
+        "Rapid Rate (m/min)", "Chip-to-Chip (sec)",
+        "Price Low ($)", "Price High ($)"
       ),
       Mazak = c(
-        machines$manufacturer[1],
-        machines$design_advantage[1],
+        machines$manufacturer[1], machines$design_note[1],
         as.character(machines$x_travel[1]),
         as.character(machines$y_travel[1]),
         as.character(machines$z_travel[1]),
@@ -443,8 +545,7 @@ server <- function(input, output, session) {
         dollar(machines$price_high[1])
       ),
       Okuma = c(
-        machines$manufacturer[2],
-        machines$design_advantage[2],
+        machines$manufacturer[2], machines$design_note[2],
         as.character(machines$x_travel[2]),
         as.character(machines$y_travel[2]),
         as.character(machines$z_travel[2]),
@@ -462,9 +563,9 @@ server <- function(input, output, session) {
     
     datatable(
       spec_rows,
-      rownames  = FALSE,
-      options   = list(dom = "t", pageLength = 20, ordering = FALSE),
-      class     = "stripe hover"
+      rownames = FALSE,
+      options  = list(dom = "t", pageLength = 20, ordering = FALSE),
+      class    = "stripe hover"
     )
   })
   
@@ -473,13 +574,15 @@ server <- function(input, output, session) {
     filename = function() paste0("tco_report_", Sys.Date(), ".csv"),
     content  = function(file) {
       df <- calculate_tco() %>%
-        select(machine, purchase, maintenance, tooling, labor,
-               energy, downtime, residual, total_tco, cost_per_hr) %>%
+        select(machine, purchase, energy, maintenance, tooling, labor,
+               downtime, residual, total_tco, cost_per_hr,
+               effective_kw, energy_annual) %>%
         mutate(
           hours_per_year    = input$hours_year,
           utilization_pct   = input$utilization,
-          mazak_design_disc = input$mazak_maint_disc,
-          okuma_design_disc = input$okuma_maint_disc
+          electricity_price = input$electricity,
+          discount_rate     = input$discount_rate,
+          residual_pct      = input$residual_pct
         )
       write.csv(df, file, row.names = FALSE)
     }
