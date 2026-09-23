@@ -25,6 +25,20 @@ Purpose: analyze text and extract most used terms. Analyze sentiment of the text
 
 https://github.com/vladdsm/rshiny-demo-ai-ideas/blob/master/app_world_cloud/app.R
 
+## Total Costs of Ownership
+
+Purpose: analyze total cost of ownership using supplier data. 
+Fine tune selling conditions margins for negotiations.
+
+https://github.com/vladdsm/rshiny-demo-ai-ideas/blob/master/app_tco_calculations/app.R
+
+Built using:
+https://www.mazak.com/eu-en/detail/china/vertical/lg-vn530cel/
+https://www.okuma.com/products/genos-m560-v
+
+
+
+
 ## Business case and Sales Discovery Applications
 
 Purpose: help to analyze products of competitors [draft]
