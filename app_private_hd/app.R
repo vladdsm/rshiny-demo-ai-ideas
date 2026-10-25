@@ -183,6 +183,7 @@ ui <- page_navbar(
     "Explore Data",
     icon = icon("magnifying-glass-chart"),
     layout_sidebar(
+      fillable = FALSE,
       sidebar = sidebar(
         h4("Data Explorer"),
         p("Explore how each clinical feature relates to diabetes risk."),
@@ -202,37 +203,37 @@ ui <- page_navbar(
         h5("Dataset Summary"),
         tableOutput("explore_summary")
       ),
-      layout_column_wrap(
-        width = 1,
+      
+      # Full-width vertical stack; each plot gets a generous fixed height.
+      # The mainPanel is already scrollable vertically.
+      tags$div(
+        style = "max-height: 88vh; overflow-y: auto; padding-right: 8px;",
+        
         card(
           card_header("All Features — Distribution by Outcome"),
           p("Each panel shows the full distribution of one feature, split by diabetes status.",
             "Hover for counts; drag to zoom."),
-          plotlyOutput("explore_grid", height = "480px")
+          plotlyOutput("explore_grid", height = "720px")
         ),
-        layout_column_wrap(
-          width = 1/2,
-          card(
-            card_header("Focused Feature — Overlaid Distributions"),
-            p("The selected feature, overlaid by the chosen grouping."),
-            plotlyOutput("explore_focus", height = "380px")
-          ),
-          card(
-            card_header("Risk Gradient — Binned Diabetes Rate"),
-            p("Average diabetes rate within each bin of the selected feature.",
-              "Shows the direction and strength of the association."),
-            plotlyOutput("explore_risk", height = "380px")
-          )
+        card(
+          card_header("Focused Feature — Overlaid Distributions"),
+          p("The selected feature, overlaid by the chosen grouping."),
+          plotlyOutput("explore_focus", height = "600px")
+        ),
+        card(
+          card_header("Risk Gradient — Binned Diabetes Rate"),
+          p("Average diabetes rate within each bin of the selected feature.",
+            "Shows the direction and strength of the association."),
+          plotlyOutput("explore_risk", height = "600px")
         ),
         card(
           card_header("Feature Correlation Matrix"),
           p("Pairwise Pearson correlation across the seven clinical features and the outcome."),
-          plotlyOutput("explore_corr", height = "520px")
+          plotlyOutput("explore_corr", height = "820px")
         )
       )
     )
   ),
-  
   # ========== TAB 2: PATIENT (DATA OWNER) ==========
   nav_panel(
     "Patient (Data Owner)",
