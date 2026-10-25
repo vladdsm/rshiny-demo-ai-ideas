@@ -122,6 +122,12 @@ trunc_ct <- function(ct, n = 20) {
   if (nchar(s) > n) paste0(substr(s, 1, n), "...") else s
 }
 
+# Append a timestamped line to a log character vector
+log_line <- function(log_vec, msg) {
+  ts <- format(Sys.time(), "%H:%M:%S")
+  c(log_vec, paste0("[", ts, "] ", msg))
+}
+
 # ------------------------------------------------------------
 # 5. UI
 # ------------------------------------------------------------
@@ -203,12 +209,8 @@ ui <- page_navbar(
         h5("Dataset Summary"),
         tableOutput("explore_summary")
       ),
-      
-      # Full-width vertical stack; each plot gets a generous fixed height.
-      # The mainPanel is already scrollable vertically.
       tags$div(
         style = "max-height: 88vh; overflow-y: auto; padding-right: 8px;",
-        
         card(
           card_header("All Features — Distribution by Outcome"),
           p("Each panel shows the full distribution of one feature, split by diabetes status.",
@@ -234,6 +236,7 @@ ui <- page_navbar(
       )
     )
   ),
+  
   # ========== TAB 2: PATIENT (DATA OWNER) ==========
   nav_panel(
     "Patient (Data Owner)",
@@ -305,8 +308,9 @@ ui <- page_navbar(
           tableOutput("analyst_cipher_table")
         ),
         card(
-          card_header("Encrypted Prediction Progress"),
-          verbatimTextOutput("compute_log")
+          card_header("Encrypted Prediction Log"),
+          p("Each step of the encrypted computation, with the actual ciphertext fragment visible at every stage."),
+          verbatimTextOutput("compute_log", placeholder = TRUE)
         )
       )
     )
@@ -321,23 +325,30 @@ ui <- page_navbar(
         h4("Decrypt Your Result"),
         p("Only you can decrypt this. The Analyst never saw the plaintext prediction."),
         actionButton("btn_decrypt", "Decrypt My Risk Score",
-                     class = "btn-success w-100"),
+                     class = "btn-success w-100 mb-2"),
         hr(),
-        h5("Verification"),
-        p("Compare homomorphic result with direct computation."),
-        tableOutput("verification_table")
+        downloadButton("dl_result", "Download Full Result Log",
+                       class = "btn-outline-primary w-100"),
+        p(class = "text-muted small mt-2",
+          "Includes your submitted values, the direct (non-encrypted) computation, the homomorphic decrypted result, and the analyst's computation log.")
       ),
-      layout_column_wrap(
-        width = 1,
+      # Wide, tall, scrollable result panel
+      tags$div(
+        style = "max-height: 88vh; overflow-y: auto; padding-right: 8px;",
         card(
           card_header("Your Diabetes Risk"),
           uiOutput("risk_box")
         ),
         card(
-          card_header("Explanation"),
-          p("The risk was computed entirely on encrypted data."),
-          p("The Analyst multiplied encrypted features by plaintext model coefficients, then summed the results homomorphically."),
-          p("You decrypted the linear predictor and applied the sigmoid locally to obtain the probability.")
+          card_header("Verification — Homomorphic vs. Direct Computation"),
+          p("Two paths to the same number: one through ciphertext, one in plaintext.",
+            "They must match."),
+          tableOutput("verification_table")
+        ),
+        card(
+          card_header("Analyst's Encrypted Computation Log"),
+          p("Everything the Analyst did, reproduced here for transparency."),
+          verbatimTextOutput("analyst_log_proof", placeholder = TRUE)
         )
       )
     )
@@ -394,6 +405,7 @@ server <- function(input, output, session) {
   encrypted_result <- reactiveVal(NULL)
   result_ready     <- reactiveVal(FALSE)
   compute_log_text <- reactiveVal("Waiting for data...")
+  last_result      <- reactiveVal(NULL)   # for download
   
   # ---------- Generate New Dataset ----------
   observeEvent(input$btn_generate, {
@@ -406,6 +418,7 @@ server <- function(input, output, session) {
     sent_to_analyst(FALSE)
     encrypted_result(NULL)
     result_ready(FALSE)
+    last_result(NULL)
     showNotification(paste("Generated", n, "patients."), type = "message")
   })
   
@@ -427,7 +440,6 @@ server <- function(input, output, session) {
                    smoker + alcohol + sport,
                  data = train_data, family = binomial())
     
-    # Intercept calibration
     mean_pred <- mean(predict(model, train_data, type = "response"))
     obs_rate  <- mean(train_data$diabetes)
     model$coefficients["(Intercept)"] <-
@@ -486,7 +498,7 @@ server <- function(input, output, session) {
     )
   })
   
-  # ---------- Feature Plot (plotly) ----------
+  # ---------- Feature Plot ----------
   output$feature_plot <- renderPlotly({
     req(model_trained())
     model <- trained_model()
@@ -696,7 +708,8 @@ server <- function(input, output, session) {
   observeEvent(input$btn_send, {
     req(encrypted_data())
     sent_to_analyst(TRUE)
-    compute_log_text("Ciphertext received. Waiting for computation...")
+    compute_log_text(paste0("[", format(Sys.time(), "%H:%M:%S"),
+                            "] Ciphertext received. Waiting for computation..."))
     showNotification("Ciphertext sent to Analyst. Switch to Analyst tab.",
                      type = "warning", duration = 5)
   })
@@ -725,32 +738,49 @@ server <- function(input, output, session) {
     model <- trained_model()
     coefs <- coef(model)
     scale_factor <- 1000L
-    log_lines <- c("Starting encrypted computation...")
+    
+    log_lines <- c(
+      log_line(character(0), "Starting encrypted computation"),
+      log_line(character(0), paste0("Scale factor: ", scale_factor,
+                                    "  (ciphertexts are multiplied by this before addition)"))
+    )
     
     intercept_scaled <- as.integer(round(coefs["(Intercept)"] * scale_factor))
     enc_result <- encrypt_int(intercept_scaled)
-    log_lines <- c(log_lines, "Added encrypted intercept.")
+    log_lines <- log_line(log_lines,
+                          paste0("E(b) with b = ", intercept_scaled,
+                                 "  ->  ", trunc_ct(enc_result, 32)))
     
     for (feat in names(enc)) {
       coef_scaled <- as.integer(round(coefs[feat] * scale_factor))
       if (coef_scaled == 0) {
-        log_lines <- c(log_lines, paste0("Skipped ", feat, " (coef=0)"))
+        log_lines <- log_line(log_lines, paste0("Skipped ", feat, " (coef=0)"))
         next
       }
       enc_term <- hom_scalar_mult(enc[[feat]], coef_scaled)
       enc_result <- hom_add(enc_result, enc_term)
-      log_lines <- c(log_lines,
-                     paste0("Added encrypted term for ", feat,
-                            " (w=", round(coefs[feat], 4), ")"))
+      log_lines <- log_line(
+        log_lines,
+        paste0("E(x_", feat, ") * ", coef_scaled,
+               "  ->  ", trunc_ct(enc_term, 24),
+               "  (accumulated ciphertext now ", trunc_ct(enc_result, 24), ")")
+      )
     }
     
-    log_lines <- c(log_lines, "Encrypted linear predictor computed.")
+    log_lines <- log_line(log_lines, "Encrypted linear predictor E(z) computed.")
+    log_lines <- log_line(log_lines,
+                          paste0("Final E(z) ciphertext: ", trunc_ct(enc_result, 48)))
+    
     encrypted_result(enc_result)
     compute_log_text(paste(log_lines, collapse = "\n"))
     showNotification("Encrypted prediction computed!", type = "message")
   })
   
   output$compute_log <- renderText({
+    compute_log_text()
+  })
+  
+  output$analyst_log_proof <- renderText({
     compute_log_text()
   })
   
@@ -762,7 +792,7 @@ server <- function(input, output, session) {
                      type = "warning", duration = 5)
   })
   
-  # ---------- Decrypt Result (with mod-n sign reconstruction) ----------
+  # ---------- Decrypt Result ----------
   observeEvent(input$btn_decrypt, {
     req(result_ready(), encrypted_result())
     
@@ -798,7 +828,11 @@ server <- function(input, output, session) {
           showcase = icon(icn),
           theme = theme
         ),
-        p(strong(lbl), " — based on your parameters.")
+        p(strong(lbl), " — based on your parameters."),
+        p(class = "text-muted",
+          paste0("Linear predictor z = ", round(linear_pred, 4),
+                 "  |  probability = ", round(risk_prob, 4),
+                 "  (computed locally, after decryption)"))
       )
     })
     
@@ -825,6 +859,23 @@ server <- function(input, output, session) {
       )
     })
     
+    # Store everything needed for the download
+    last_result(list(
+      timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+      submitted_values = data.frame(
+        Feature = c("Age", "Systolic BP", "Blood Sugar", "BMI",
+                    "Smoker", "Alcohol", "Sport"),
+        Value = c(input$in_age, input$in_systolic_bp, input$in_sugar,
+                  input$in_bmi, input$in_smoker, input$in_alcohol, input$in_sport)
+      ),
+      linear_predictor_homomorphic = linear_pred,
+      linear_predictor_direct      = direct_pred,
+      probability_homomorphic      = risk_prob,
+      probability_direct           = direct_prob,
+      risk_label = lbl,
+      analyst_log = compute_log_text()
+    ))
+    
     showNotification("Result decrypted!", type = "message")
   })
   
@@ -837,6 +888,52 @@ server <- function(input, output, session) {
   output$dl_pubkey <- downloadHandler(
     filename = function() "paillier_public_key.rds",
     content = function(file) saveRDS(pubkey, file)
+  )
+  
+  output$dl_result <- downloadHandler(
+    filename = function() {
+      paste0("diabetes_risk_result_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt")
+    },
+    content = function(file) {
+      r <- last_result()
+      if (is.null(r)) {
+        writeLines("No result available yet. Please run the encrypted prediction and decrypt it first.", file)
+        return()
+      }
+      lines <- c(
+        "==============================================",
+        " Encrypted Diabetes Risk Prediction — Result",
+        "==============================================",
+        paste0("Generated: ", r$timestamp),
+        "",
+        "--- Submitted Values (Plaintext, Patient Side) ---",
+        paste0("  ", r$submitted_values$Feature, ": ", r$submitted_values$Value),
+        "",
+        "--- Result Summary ---",
+        paste0("  Homomorphic (decrypted) linear predictor: ", round(r$linear_predictor_homomorphic, 4)),
+        paste0("  Direct computation linear predictor:      ", round(r$linear_predictor_direct, 4)),
+        paste0("  Homomorphic (decrypted) probability:      ", round(r$probability_homomorphic, 4),
+               "  (", round(r$probability_homomorphic * 100, 1), "%)"),
+        paste0("  Direct computation probability:           ", round(r$probability_direct, 4),
+               "  (", round(r$probability_direct * 100, 1), "%)"),
+        paste0("  Risk category:                            ", r$risk_label),
+        "",
+        "--- Verification ---",
+        paste0("  |z_homomorphic - z_direct| = ",
+               round(abs(r$linear_predictor_homomorphic - r$linear_predictor_direct), 8)),
+        paste0("  |p_homomorphic - p_direct| = ",
+               round(abs(r$probability_homomorphic - r$probability_direct), 8)),
+        "",
+        "--- Analyst's Encrypted Computation Log ---",
+        r$analyst_log,
+        "",
+        "--- Notes ---",
+        "The analyst never saw the submitted values in plaintext.",
+        "The probability was computed by the patient after decrypting the linear predictor.",
+        "All ciphertexts are visible above in truncated form; full ciphertexts are mod-n Paillier values."
+      )
+      writeLines(lines, file)
+    }
   )
 }
 
