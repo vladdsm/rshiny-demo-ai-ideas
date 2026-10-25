@@ -11,6 +11,10 @@
 # The model is auto-trained at app start so the full workflow
 # is usable immediately; users can also regenerate data and
 # retrain interactively.
+#
+# Key management: the patient can regenerate a keypair,
+# download a full keypair or public key only, and upload a
+# previously saved keypair or public key.
 # ============================================================
 
 library(shiny)
@@ -114,13 +118,20 @@ train_calibrated_model <- function(df) {
 }
 
 # ------------------------------------------------------------
-# 4. KEY GENERATION (once per session)
+# 4. KEYPAIR FACTORY (session-owned, reactive)
 # ------------------------------------------------------------
-cat("Generating Paillier keypair (1024-bit)...\n")
-keyPair <- PaillierKeyPair$new(modulusBits = 1024)
-pubkey <- keyPair$pubkey
-privkey <- keyPair$getPrivateKey()
-cat("Keypair ready.\n")
+make_keypair <- function(bits = 1024) {
+  kp <- PaillierKeyPair$new(modulusBits = bits)
+  list(
+    keyPair = kp,
+    pubkey  = kp$pubkey,
+    privkey = kp$getPrivateKey()
+  )
+}
+
+make_public_only <- function(pub) {
+  list(keyPair = NULL, pubkey = pub, privkey = NULL)
+}
 
 # ------------------------------------------------------------
 # 5. AUTO-TRAIN AT APP START
@@ -131,24 +142,9 @@ initial_trained  <- train_calibrated_model(initial_patients)
 cat("Initial model ready. App is immediately usable.\n")
 
 # ------------------------------------------------------------
-# 6. HELPER FUNCTIONS
+# 6. HELPER FUNCTIONS (ciphertext-space helpers are defined
+#    inside the server because they depend on the session key)
 # ------------------------------------------------------------
-encrypt_int <- function(x) {
-  pubkey$encrypt(as.bigz(as.integer(x)))
-}
-
-hom_add <- function(ct1, ct2) {
-  pubkey$add(ct1, ct2)
-}
-
-hom_scalar_mult <- function(ct, k) {
-  k <- as.integer(k)
-  if (k == 0) return(encrypt_int(0))
-  if (k > 0)  return(pubkey$mult(ct, k))
-  pos <- pubkey$mult(ct, abs(k))
-  pubkey$sub(encrypt_int(0), pos)
-}
-
 trunc_ct <- function(ct, n = 20) {
   s <- as.character(ct)
   if (nchar(s) > n) paste0(substr(s, 1, n), "...") else s
@@ -297,10 +293,20 @@ ui <- page_navbar(
                      class = "btn-info w-100 mb-2"),
         hr(),
         h5("Key Management"),
-        downloadButton("dl_privkey", "Download Private Key",
+        uiOutput("key_status_badge"),
+        actionButton("btn_regen_keys", "Regenerate Keypair",
+                     class = "btn-outline-danger w-100 mb-2"),
+        downloadButton("dl_privkey", "Download Full Keypair (private)",
                        class = "btn-outline-secondary w-100 mb-2"),
-        downloadButton("dl_pubkey", "Download Public Key",
-                       class = "btn-outline-secondary w-100 mb-2")
+        downloadButton("dl_pubkey", "Download Public Key Only",
+                       class = "btn-outline-secondary w-100 mb-2"),
+        fileInput("upload_key", "Upload Keypair or Public Key (.rds)",
+                  accept = ".rds", buttonLabel = "Browse",
+                  placeholder = "No file selected"),
+        p(class = "text-muted small mt-2",
+          "Regenerating a keypair invalidates any ciphertexts produced under the old keys. ",
+          "Upload a previously-downloaded keypair to restore a session, or a public key ",
+          "to encrypt under someone else's key (you will not be able to decrypt in that case).")
       ),
       layout_column_wrap(
         width = 1,
@@ -416,6 +422,10 @@ ui <- page_navbar(
       p("A calibrated logistic regression is fit automatically when the app starts, so the demo is usable immediately.",
         "You can regenerate data and retrain at any time from the Data & Model tab."),
       hr(),
+      h4("Key Management"),
+      p("The patient can regenerate a keypair, download a full keypair or public key only, and upload a previously saved file.",
+        "Regenerating or uploading a different key invalidates any ciphertext produced under the old key."),
+      hr(),
       h4("Limitations"),
       tags$ul(
         tags$li("Paillier supports addition only (not multiplication of two ciphertexts)."),
@@ -432,7 +442,30 @@ ui <- page_navbar(
 # ------------------------------------------------------------
 server <- function(input, output, session) {
   
-  # Start with the pre-trained model
+  # ---------- Session-owned keypair ----------
+  cat("Generating Paillier keypair (1024-bit)...\n")
+  keys <- reactiveVal(make_keypair(1024))
+  cat("Keypair ready.\n")
+  
+  pubkey_now  <- function() keys()$pubkey
+  privkey_now <- function() keys()$privkey
+  
+  # ---------- Ciphertext helpers (depend on session key) ----------
+  encrypt_int <- function(x) {
+    pubkey_now()$encrypt(as.bigz(as.integer(x)))
+  }
+  hom_add <- function(ct1, ct2) {
+    pubkey_now()$add(ct1, ct2)
+  }
+  hom_scalar_mult <- function(ct, k) {
+    k <- as.integer(k)
+    if (k == 0) return(encrypt_int(0))
+    if (k > 0)  return(pubkey_now()$mult(ct, k))
+    pos <- pubkey_now()$mult(ct, abs(k))
+    pubkey_now()$sub(encrypt_int(0), pos)
+  }
+  
+  # ---------- Reactive state ----------
   patients         <- reactiveVal(initial_patients)
   model_trained    <- reactiveVal(TRUE)
   trained_model    <- reactiveVal(initial_trained$model)
@@ -446,7 +479,77 @@ server <- function(input, output, session) {
   compute_log_text <- reactiveVal("Waiting for data...")
   last_result      <- reactiveVal(NULL)
   
-  # ---------- Status badge ----------
+  # ============================================================
+  # KEY MANAGEMENT
+  # ============================================================
+  output$key_status_badge <- renderUI({
+    k <- keys()
+    if (!is.null(k$privkey)) {
+      div(class = "alert alert-success py-2 px-3 mb-2",
+          icon("key"), " Full keypair loaded (can decrypt).")
+    } else if (!is.null(k$pubkey)) {
+      div(class = "alert alert-warning py-2 px-3 mb-2",
+          icon("key"), " Public key only (cannot decrypt).")
+    } else {
+      div(class = "alert alert-danger py-2 px-3 mb-2",
+          icon("ban"), " No key loaded.")
+    }
+  })
+  
+  reset_downstream <- function() {
+    encrypted_data(NULL)
+    sent_to_analyst(FALSE)
+    encrypted_result(NULL)
+    result_ready(FALSE)
+    compute_log_text("Waiting for data...")
+    last_result(NULL)
+  }
+  
+  observeEvent(input$btn_regen_keys, {
+    showNotification("Generating a new Paillier keypair…",
+                     type = "message", duration = 3)
+    keys(make_keypair(1024))
+    reset_downstream()
+    showNotification("New keypair generated. Any previous ciphertexts are now invalid.",
+                     type = "warning", duration = 6)
+  })
+  
+  observeEvent(input$upload_key, {
+    req(input$upload_key)
+    obj <- tryCatch(
+      readRDS(input$upload_key$datapath),
+      error = function(e) {
+        showNotification(paste("Could not read file:", conditionMessage(e)),
+                         type = "error", duration = 6)
+        NULL
+      }
+    )
+    if (is.null(obj)) return()
+    
+    if (is.list(obj) && !is.null(obj$pubkey) && !is.null(obj$privkey)) {
+      keys(obj)
+      showNotification("Full keypair uploaded. You can encrypt and decrypt.",
+                       type = "message", duration = 5)
+    } else if (inherits(obj, "PaillierPublicKey")) {
+      keys(make_public_only(obj))
+      showNotification("Public key uploaded. You can encrypt, but not decrypt.",
+                       type = "warning", duration = 6)
+    } else if (is.list(obj) && inherits(obj$pubkey, "PaillierPublicKey")) {
+      keys(make_public_only(obj$pubkey))
+      showNotification("Public key uploaded. You can encrypt, but not decrypt.",
+                       type = "warning", duration = 6)
+    } else {
+      showNotification("Unrecognised file format. Upload a keypair or public key .rds file.",
+                       type = "error", duration = 6)
+      return()
+    }
+    
+    reset_downstream()
+  })
+  
+  # ============================================================
+  # DATA & MODEL
+  # ============================================================
   output$model_status_badge <- renderUI({
     if (model_trained()) {
       div(class = "alert alert-success py-2 px-3 mb-0",
@@ -457,7 +560,6 @@ server <- function(input, output, session) {
     }
   })
   
-  # ---------- Generate New Dataset ----------
   observeEvent(input$btn_generate, {
     n <- input$n_patients
     patients(generate_patients(n))
@@ -465,17 +567,13 @@ server <- function(input, output, session) {
     trained_model(NULL)
     test_data(NULL)
     train_data_val(NULL)
-    encrypted_data(NULL)
-    sent_to_analyst(FALSE)
-    encrypted_result(NULL)
-    result_ready(FALSE)
-    last_result(NULL)
+    reset_downstream()
     output$confusion_table <- renderTable(NULL)
-    showNotification(paste0("Generated ", n, " patients. Click 'Retrain Model' to fit on the new data."),
+    showNotification(paste0("Generated ", n,
+                            " patients. Click 'Retrain Model' to fit on the new data."),
                      type = "message", duration = 5)
   })
   
-  # ---------- Retrain Model ----------
   observeEvent(input$btn_train, {
     df <- patients()
     res <- train_calibrated_model(df)
@@ -483,29 +581,11 @@ server <- function(input, output, session) {
     test_data(res$test_set)
     train_data_val(res$train_data)
     model_trained(TRUE)
-    
-    # Reset downstream state so old ciphertext/result can't be reused
-    encrypted_data(NULL)
-    sent_to_analyst(FALSE)
-    encrypted_result(NULL)
-    result_ready(FALSE)
-    compute_log_text("Waiting for data...")
-    last_result(NULL)
-    
-    pred_prob <- predict(res$model, res$test_set, type = "response")
-    pred_class <- ifelse(pred_prob > 0.5, 1, 0)
-    conf_mat <- table(Predicted = pred_class, Actual = res$test_set$diabetes)
-    
-    output$confusion_table <- renderTable({
-      df_cm <- as.data.frame.matrix(conf_mat)
-      df_cm$Predicted <- rownames(df_cm)
-      df_cm[, c("Predicted", colnames(df_cm)[1:2])]
-    })
-    
-    showNotification("Model retrained and calibrated successfully!", type = "message")
+    reset_downstream()
+    showNotification("Model retrained and calibrated successfully!",
+                     type = "message")
   })
   
-  # ---------- Populate confusion matrix on first render ----------
   output$confusion_table <- renderTable({
     req(model_trained(), trained_model(), test_data())
     model <- trained_model()
@@ -518,12 +598,10 @@ server <- function(input, output, session) {
     df_cm[, c("Predicted", colnames(df_cm)[1:2])]
   })
   
-  # ---------- Data Preview ----------
   output$data_preview <- renderTable({
     head(patients(), 10)
   })
   
-  # ---------- Model Summary ----------
   output$model_summary <- renderText({
     req(model_trained())
     model <- trained_model()
@@ -547,7 +625,6 @@ server <- function(input, output, session) {
     )
   })
   
-  # ---------- Model Coefficients ----------
   output$model_coef_table <- renderTable({
     req(model_trained())
     model <- trained_model()
@@ -558,7 +635,6 @@ server <- function(input, output, session) {
     )
   })
   
-  # ---------- Feature Plot ----------
   output$feature_plot <- renderPlotly({
     req(model_trained())
     model <- trained_model()
@@ -583,14 +659,16 @@ server <- function(input, output, session) {
     ggplotly(p, tooltip = "text")
   })
   
-  # ---------- Explore Data: All Features Grid ----------
+  # ============================================================
+  # EXPLORE DATA
+  # ============================================================
   output$explore_grid <- renderPlotly({
     df <- patients()
     long <- rbind(
-      data.frame(diabetes = df$diabetes, feature = "Age",            value = df$age),
-      data.frame(diabetes = df$diabetes, feature = "Systolic BP",    value = df$systolic_bp),
-      data.frame(diabetes = df$diabetes, feature = "Blood Sugar",    value = df$sugar),
-      data.frame(diabetes = df$diabetes, feature = "BMI",            value = df$bmi)
+      data.frame(diabetes = df$diabetes, feature = "Age",         value = df$age),
+      data.frame(diabetes = df$diabetes, feature = "Systolic BP", value = df$systolic_bp),
+      data.frame(diabetes = df$diabetes, feature = "Blood Sugar", value = df$sugar),
+      data.frame(diabetes = df$diabetes, feature = "BMI",         value = df$bmi)
     )
     long$diabetes <- factor(long$diabetes, labels = c("No Diabetes", "Diabetes"))
     long$feature  <- factor(long$feature,
@@ -611,7 +689,6 @@ server <- function(input, output, session) {
       layout(margin = list(t = 30))
   })
   
-  # ---------- Explore Data: Focused Feature Overlay ----------
   output$explore_focus <- renderPlotly({
     df <- patients()
     feat <- input$explore_feature
@@ -635,7 +712,8 @@ server <- function(input, output, session) {
       geom_histogram(alpha = 0.6, bins = 30, position = "identity",
                      color = "white", linewidth = 0.2) +
       scale_fill_manual(values = pal) +
-      labs(x = tools::toTitleCase(gsub("_", " ", feat)), y = "Count", fill = NULL) +
+      labs(x = tools::toTitleCase(gsub("_", " ", feat)),
+           y = "Count", fill = NULL) +
       theme_minimal(base_size = 13) +
       theme(legend.position = "top",
             panel.grid.minor = element_blank())
@@ -643,7 +721,6 @@ server <- function(input, output, session) {
     ggplotly(p, tooltip = c("x", "y", "fill"))
   })
   
-  # ---------- Explore Data: Binned Risk Gradient ----------
   output$explore_risk <- renderPlotly({
     df <- patients()
     feat <- input$explore_feature
@@ -676,7 +753,6 @@ server <- function(input, output, session) {
     ggplotly(p, tooltip = "text")
   })
   
-  # ---------- Explore Data: Correlation Matrix ----------
   output$explore_corr <- renderPlotly({
     df <- patients()
     cols <- c("age", "systolic_bp", "sugar", "bmi",
@@ -707,7 +783,6 @@ server <- function(input, output, session) {
       layout(margin = list(l = 80, b = 80))
   })
   
-  # ---------- Explore Data: Summary Table ----------
   output$explore_summary <- renderTable({
     df <- patients()
     data.frame(
@@ -727,7 +802,9 @@ server <- function(input, output, session) {
       )
   })
   
-  # ---------- Patient Summary ----------
+  # ============================================================
+  # PATIENT FLOW
+  # ============================================================
   output$patient_summary <- renderTable({
     data.frame(
       Feature = c("Age", "Systolic BP", "Blood Sugar", "BMI",
@@ -737,9 +814,13 @@ server <- function(input, output, session) {
     )
   })
   
-  # ---------- Encrypt Patient Data ----------
   observeEvent(input$btn_encrypt, {
     req(model_trained())
+    if (is.null(pubkey_now())) {
+      showNotification("No public key available. Generate or upload one first.",
+                       type = "error", duration = 6)
+      return()
+    }
     values <- c(
       age = as.integer(input$in_age),
       systolic_bp = as.integer(input$in_systolic_bp),
@@ -754,7 +835,6 @@ server <- function(input, output, session) {
     showNotification("Data encrypted locally. Ready to send.", type = "message")
   })
   
-  # ---------- Ciphertext Display ----------
   output$ciphertext_display <- renderTable({
     req(encrypted_data())
     enc <- encrypted_data()
@@ -764,7 +844,6 @@ server <- function(input, output, session) {
     )
   })
   
-  # ---------- Send to Analyst ----------
   observeEvent(input$btn_send, {
     req(encrypted_data())
     sent_to_analyst(TRUE)
@@ -774,13 +853,14 @@ server <- function(input, output, session) {
                      type = "warning", duration = 5)
   })
   
-  # ---------- Analyst Status ----------
+  # ============================================================
+  # ANALYST FLOW
+  # ============================================================
   output$analyst_cipher_status <- renderText({
     if (sent_to_analyst()) "Ciphertext received and ready for computation."
     else "No data received yet."
   })
   
-  # ---------- Analyst Cipher Table ----------
   output$analyst_cipher_table <- renderTable({
     req(sent_to_analyst(), encrypted_data())
     enc <- encrypted_data()
@@ -790,7 +870,6 @@ server <- function(input, output, session) {
     )
   })
   
-  # ---------- Compute Encrypted Prediction ----------
   observeEvent(input$btn_compute, {
     req(sent_to_analyst(), encrypted_data(), model_trained())
     
@@ -844,7 +923,6 @@ server <- function(input, output, session) {
     compute_log_text()
   })
   
-  # ---------- Return Result ----------
   observeEvent(input$btn_return, {
     req(encrypted_result())
     result_ready(TRUE)
@@ -852,21 +930,24 @@ server <- function(input, output, session) {
                      type = "warning", duration = 5)
   })
   
-  # ---------- Decrypt Result ----------
+  # ============================================================
+  # DECRYPT + VERIFY
+  # ============================================================
   observeEvent(input$btn_decrypt, {
     req(result_ready(), encrypted_result())
+    k <- keys()
+    if (is.null(k$privkey)) {
+      showNotification("Cannot decrypt: only a public key is loaded.",
+                       type = "error", duration = 6)
+      return()
+    }
     
     scale_factor <- 1000
-    
-    raw <- privkey$decrypt(encrypted_result())
-    n_mod <- pubkey$n
+    raw   <- k$privkey$decrypt(encrypted_result())
+    n_mod <- k$pubkey$n
     
     half_n <- n_mod %/% 2
-    signed_scaled <- if (as.bigz(raw) > half_n) {
-      as.bigz(raw) - n_mod
-    } else {
-      as.bigz(raw)
-    }
+    signed_scaled <- if (as.bigz(raw) > half_n) as.bigz(raw) - n_mod else as.bigz(raw)
     
     linear_pred <- as.numeric(signed_scaled) / scale_factor
     risk_prob   <- 1 / (1 + exp(-linear_pred))
@@ -938,15 +1019,26 @@ server <- function(input, output, session) {
     showNotification("Result decrypted!", type = "message")
   })
   
-  # ---------- Downloads ----------
+  # ============================================================
+  # DOWNLOADS
+  # ============================================================
   output$dl_privkey <- downloadHandler(
-    filename = function() "paillier_private_key.rds",
-    content = function(file) saveRDS(privkey, file)
+    filename = function() "paillier_keypair.rds",
+    content = function(file) {
+      k <- keys()
+      if (is.null(k$privkey)) {
+        saveRDS(list(note = "Public key only; no private key available."), file)
+      } else {
+        saveRDS(k, file)
+      }
+    }
   )
   
   output$dl_pubkey <- downloadHandler(
     filename = function() "paillier_public_key.rds",
-    content = function(file) saveRDS(pubkey, file)
+    content = function(file) {
+      saveRDS(keys()$pubkey, file)
+    }
   )
   
   output$dl_result <- downloadHandler(
@@ -956,7 +1048,8 @@ server <- function(input, output, session) {
     content = function(file) {
       r <- last_result()
       if (is.null(r)) {
-        writeLines("No result available yet. Please run the encrypted prediction and decrypt it first.", file)
+        writeLines("No result available yet. Please run the encrypted prediction and decrypt it first.",
+                   file)
         return()
       }
       lines <- c(
@@ -969,11 +1062,15 @@ server <- function(input, output, session) {
         paste0("  ", r$submitted_values$Feature, ": ", r$submitted_values$Value),
         "",
         "--- Result Summary ---",
-        paste0("  Homomorphic (decrypted) linear predictor: ", round(r$linear_predictor_homomorphic, 4)),
-        paste0("  Direct computation linear predictor:      ", round(r$linear_predictor_direct, 4)),
-        paste0("  Homomorphic (decrypted) probability:      ", round(r$probability_homomorphic, 4),
+        paste0("  Homomorphic (decrypted) linear predictor: ",
+               round(r$linear_predictor_homomorphic, 4)),
+        paste0("  Direct computation linear predictor:      ",
+               round(r$linear_predictor_direct, 4)),
+        paste0("  Homomorphic (decrypted) probability:      ",
+               round(r$probability_homomorphic, 4),
                "  (", round(r$probability_homomorphic * 100, 1), "%)"),
-        paste0("  Direct computation probability:           ", round(r$probability_direct, 4),
+        paste0("  Direct computation probability:           ",
+               round(r$probability_direct, 4),
                "  (", round(r$probability_direct * 100, 1), "%)"),
         paste0("  Risk category:                            ", r$risk_label),
         "",
