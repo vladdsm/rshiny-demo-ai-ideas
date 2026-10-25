@@ -8,7 +8,8 @@
 # - The Patient decrypts the prediction themselves
 # - The Analyst never sees any raw patient data
 #
-# Verified working with homomorpheR Paillier (methods: mult, add, sub_real)
+# Verified working with homomorpheR Paillier (methods: mult, add, sub)
+# Handles negative linear predictors via mod-n reconstruction.
 # ============================================================
 
 library(shiny)
@@ -24,7 +25,7 @@ thematic_shiny()
 # 1. CLINICAL RISK FORMULA (GP LOGIC)
 # ------------------------------------------------------------
 clinical_coefs <- list(
-  intercept         = -1.20,
+  intercept         = -2.50,
   age               =  0.035,
   sugar             =  0.45,
   systolic_bp       =  0.30,
@@ -99,12 +100,6 @@ cat("Keypair ready.\n")
 # ------------------------------------------------------------
 # 4. HELPER FUNCTIONS
 # ------------------------------------------------------------
-# Paillier in homomorpheR works on non-negative integers mod n.
-# To handle signed coefficients, we encode negative values by
-# adding a large constant OFFSET before encryption, then
-# subtract the accumulated offset from the decrypted result.
-OFFSET <- 1000000L
-
 encrypt_int <- function(x) {
   pubkey$encrypt(as.bigz(as.integer(x)))
 }
@@ -113,19 +108,12 @@ hom_add <- function(ct1, ct2) {
   pubkey$add(ct1, ct2)
 }
 
-# Scalar multiplication that handles negative scalars safely.
-# E(k*x) = E(x)^k for k >= 0. For k < 0, we use
-# E(-|k|*x) = E(0) - E(|k|*x) via sub_real.
+# Scalar multiplication with safe negative handling.
 hom_scalar_mult <- function(ct, k) {
   k <- as.integer(k)
   if (k == 0) return(encrypt_int(0))
   if (k > 0)  return(pubkey$mult(ct, k))
-  # k < 0: compute E(|k|*x) then negate
   pos <- pubkey$mult(ct, abs(k))
-  # sub_real(E(a), ct) = E(a - plaintext(ct))? No — sub_real takes
-  # a ciphertext and a *plaintext* real. In this Paillier API,
-  # sub() subtracts two ciphertexts: E(a) - E(b) = E(a - b).
-  # E(0) - E(|k|*x) = E(-|k|*x)  ✓
   pubkey$sub(encrypt_int(0), pos)
 }
 
@@ -203,12 +191,12 @@ ui <- page_navbar(
       sidebar = sidebar(
         h4("Your Health Data"),
         p("Adjust your values. These will be encrypted before leaving your device."),
-        sliderInput("in_age", "Age", min = 20, max = 85, value = 55, step = 1),
+        sliderInput("in_age", "Age", min = 20, max = 85, value = 40, step = 1),
         sliderInput("in_systolic_bp", "Systolic Blood Pressure",
-                    min = 95, max = 195, value = 130, step = 1),
+                    min = 95, max = 195, value = 120, step = 1),
         sliderInput("in_sugar", "Blood Sugar (mg/dL)",
-                    min = 60, max = 220, value = 110, step = 1),
-        sliderInput("in_bmi", "BMI", min = 16, max = 45, value = 27, step = 1),
+                    min = 60, max = 220, value = 95, step = 1),
+        sliderInput("in_bmi", "BMI", min = 16, max = 45, value = 24, step = 1),
         radioButtons("in_smoker", "Smoker",
                      choices = c("No" = 0, "Yes" = 1), inline = TRUE),
         radioButtons("in_alcohol", "Alcohol Consumption",
@@ -322,6 +310,9 @@ ui <- page_navbar(
         tags$li(strong("Analyst:"), "Holds public key and model weights. Computes on ciphertext only.")
       ),
       hr(),
+      h4("Signed Values on Ciphertext"),
+      p("Paillier operates on integers modulo n. Negative values are represented as n - |x| in ciphertext space and reconstructed by the patient after decryption. This allows coefficients and predictors of any sign."),
+      hr(),
       h4("Dataset Generation"),
       p("Patients are simulated from realistic marginals. Diabetes labels are assigned by sampling from the clinical probability:"),
       withMathJax(helpText("$$P(\\text{diabetes}) = \\sigma(z)$$")),
@@ -395,7 +386,7 @@ server <- function(input, output, session) {
       theme(legend.position = "top")
   })
   
-  # ---------- Train Model ----------
+  # ---------- Train Model (with intercept calibration) ----------
   observeEvent(input$btn_train, {
     df <- patients()
     set.seed(123)
@@ -407,6 +398,15 @@ server <- function(input, output, session) {
     model <- glm(diabetes ~ age + systolic_bp + sugar + bmi +
                    smoker + alcohol + sport,
                  data = train_data, family = binomial())
+    
+    # Intercept calibration
+    mean_pred <- mean(predict(model, train_data, type = "response"))
+    obs_rate  <- mean(train_data$diabetes)
+    model$coefficients["(Intercept)"] <-
+      model$coefficients["(Intercept)"] +
+      log(obs_rate / (1 - obs_rate)) -
+      log(mean_pred / (1 - mean_pred))
+    
     trained_model(model)
     model_trained(TRUE)
     
@@ -420,7 +420,7 @@ server <- function(input, output, session) {
       df_cm[, c("Predicted", colnames(df_cm)[1:2])]
     })
     
-    showNotification("Model trained successfully!", type = "message")
+    showNotification("Model trained and calibrated successfully!", type = "message")
   })
   
   # ---------- Model Summary ----------
@@ -438,12 +438,12 @@ server <- function(input, output, session) {
     auc <- if (length(pos) > 0 && length(neg) > 0) mean(outer(pos, neg, ">")) else NA
     
     paste0(
-      "Model: Logistic Regression\n",
+      "Model: Logistic Regression (calibrated)\n",
       "Training samples: ", nrow(patients()) - nrow(test), "\n",
       "Test samples: ", nrow(test), "\n",
       "Test Accuracy: ", round(accuracy * 100, 2), "%\n",
       "Approx. AUC: ", round(auc, 3), "\n",
-      "Positive rate (test): ", round(mean(test$diabetes) * 100, 1), "%"
+      "Positive rate (train): ", round(mean(patients()$diabetes) * 100, 1), "%"
     )
   })
   
@@ -541,13 +541,6 @@ server <- function(input, output, session) {
   })
   
   # ---------- Compute Encrypted Prediction ----------
-  # Core Paillier operations used:
-  #   pubkey$mult(ct, k)     -> E(k * x) for plaintext scalar k
-  #   pubkey$add(ct1, ct2)   -> E(a + b)
-  #   pubkey$sub(ct1, ct2)   -> E(a - b)
-  #
-  # Linear predictor: z = b0 + sum(w_i * x_i)
-  # Scaled by 1000 to preserve precision through integer encryption.
   observeEvent(input$btn_compute, {
     req(sent_to_analyst(), encrypted_data(), model_trained())
     
@@ -557,7 +550,6 @@ server <- function(input, output, session) {
     scale_factor <- 1000L
     log_lines <- c("Starting encrypted computation...")
     
-    # Encrypted scaled intercept
     intercept_scaled <- as.integer(round(coefs["(Intercept)"] * scale_factor))
     enc_result <- encrypt_int(intercept_scaled)
     log_lines <- c(log_lines, "Added encrypted intercept.")
@@ -568,11 +560,8 @@ server <- function(input, output, session) {
         log_lines <- c(log_lines, paste0("Skipped ", feat, " (coef=0)"))
         next
       }
-      
-      # Scalar multiplication with sign handling
       enc_term <- hom_scalar_mult(enc[[feat]], coef_scaled)
       enc_result <- hom_add(enc_result, enc_term)
-      
       log_lines <- c(log_lines,
                      paste0("Added encrypted term for ", feat,
                             " (w=", round(coefs[feat], 4), ")"))
@@ -596,23 +585,47 @@ server <- function(input, output, session) {
                      type = "warning", duration = 5)
   })
   
-  # ---------- Decrypt Result ----------
+  # ---------- Decrypt Result (with mod-n sign reconstruction) ----------
   observeEvent(input$btn_decrypt, {
     req(result_ready(), encrypted_result())
     
     scale_factor <- 1000
-    decrypted_scaled <- as.integer(privkey$decrypt(encrypted_result()))
-    linear_pred <- decrypted_scaled / scale_factor
-    risk_prob <- 1 / (1 + exp(-linear_pred))
+    
+    # Decrypt raw scaled integer in ciphertext space (mod n)
+    raw <- privkey$decrypt(encrypted_result())   # bigz in [0, n)
+    n_mod <- pubkey$n                            # bigz modulus
+    
+    # Reconstruct signed value: if raw > n/2, it represents a negative number
+    half_n <- n_mod %/% 2
+    signed_scaled <- if (as.bigz(raw) > half_n) {
+      as.bigz(raw) - n_mod
+    } else {
+      as.bigz(raw)
+    }
+    
+    # Convert to numeric and apply scale
+    linear_pred <- as.numeric(signed_scaled) / scale_factor
+    risk_prob   <- 1 / (1 + exp(-linear_pred))
+    pct         <- round(risk_prob * 100, 1)
+    
+    # Risk categorisation (guaranteed non-NA now)
+    if (pct < 20) {
+      lbl <- "Low risk";      theme <- "success"; icn <- "check-circle"
+    } else if (pct < 50) {
+      lbl <- "Moderate risk"; theme <- "warning"; icn <- "exclamation-triangle"
+    } else {
+      lbl <- "High risk";     theme <- "danger";  icn <- "heart-pulse"
+    }
     
     output$risk_box <- renderUI({
-      pct <- round(risk_prob * 100, 1)
-      color <- if (pct < 20) "success" else if (pct < 50) "warning" else "danger"
-      value_box(
-        title = "Predicted Diabetes Risk",
-        value = paste0(pct, "%"),
-        showcase = icon("heart-pulse"),
-        theme = color
+      tagList(
+        value_box(
+          title = "Predicted Diabetes Risk",
+          value = paste0(pct, "%"),
+          showcase = icon(icn),
+          theme = theme
+        ),
+        p(strong(lbl), " — based on your parameters.")
       )
     })
     
