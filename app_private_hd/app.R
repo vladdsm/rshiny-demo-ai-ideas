@@ -8,8 +8,9 @@
 # - The Patient decrypts the prediction themselves
 # - The Analyst never sees any raw patient data
 #
-# Verified working with homomorpheR Paillier (methods: mult, add, sub)
-# Handles negative linear predictors via mod-n reconstruction.
+# The model is auto-trained at app start so the full workflow
+# is usable immediately; users can also regenerate data and
+# retrain interactively.
 # ============================================================
 
 library(shiny)
@@ -90,7 +91,30 @@ generate_patients <- function(n) {
 }
 
 # ------------------------------------------------------------
-# 3. KEY GENERATION (once per session)
+# 3. TRAIN + CALIBRATE MODEL
+# ------------------------------------------------------------
+train_calibrated_model <- function(df) {
+  set.seed(123)
+  train_idx <- sample(1:nrow(df), 0.7 * nrow(df))
+  train_data <- df[train_idx, ]
+  test_set   <- df[-train_idx, ]
+  
+  model <- glm(diabetes ~ age + systolic_bp + sugar + bmi +
+                 smoker + alcohol + sport,
+               data = train_data, family = binomial())
+  
+  mean_pred <- mean(predict(model, train_data, type = "response"))
+  obs_rate  <- mean(train_data$diabetes)
+  model$coefficients["(Intercept)"] <-
+    model$coefficients["(Intercept)"] +
+    log(obs_rate / (1 - obs_rate)) -
+    log(mean_pred / (1 - mean_pred))
+  
+  list(model = model, test_set = test_set, train_data = train_data)
+}
+
+# ------------------------------------------------------------
+# 4. KEY GENERATION (once per session)
 # ------------------------------------------------------------
 cat("Generating Paillier keypair (1024-bit)...\n")
 keyPair <- PaillierKeyPair$new(modulusBits = 1024)
@@ -99,7 +123,15 @@ privkey <- keyPair$getPrivateKey()
 cat("Keypair ready.\n")
 
 # ------------------------------------------------------------
-# 4. HELPER FUNCTIONS
+# 5. AUTO-TRAIN AT APP START
+# ------------------------------------------------------------
+cat("Generating initial synthetic dataset and training model...\n")
+initial_patients <- generate_patients(2000)
+initial_trained  <- train_calibrated_model(initial_patients)
+cat("Initial model ready. App is immediately usable.\n")
+
+# ------------------------------------------------------------
+# 6. HELPER FUNCTIONS
 # ------------------------------------------------------------
 encrypt_int <- function(x) {
   pubkey$encrypt(as.bigz(as.integer(x)))
@@ -122,14 +154,13 @@ trunc_ct <- function(ct, n = 20) {
   if (nchar(s) > n) paste0(substr(s, 1, n), "...") else s
 }
 
-# Append a timestamped line to a log character vector
 log_line <- function(log_vec, msg) {
   ts <- format(Sys.time(), "%H:%M:%S")
   c(log_vec, paste0("[", ts, "] ", msg))
 }
 
 # ------------------------------------------------------------
-# 5. UI
+# 7. UI
 # ------------------------------------------------------------
 ui <- page_navbar(
   title = "Encrypted Diabetes Risk Prediction",
@@ -147,14 +178,16 @@ ui <- page_navbar(
     layout_sidebar(
       sidebar = sidebar(
         h4("Synthetic Dataset"),
-        p("Data generated from explicit clinical risk formulas."),
+        p("A model is trained automatically at app start, so the demo works immediately.",
+          "You can also generate a fresh dataset and retrain."),
         numericInput("n_patients", "Number of patients to generate:",
                      value = 2000, min = 200, max = 20000, step = 100),
         actionButton("btn_generate", "Generate New Dataset",
                      class = "btn-secondary w-100 mb-2"),
-        hr(),
-        actionButton("btn_train", "Train Logistic Regression Model",
+        actionButton("btn_train", "Retrain Model",
                      class = "btn-primary w-100"),
+        hr(),
+        uiOutput("model_status_badge"),
         hr(),
         h5("Model Coefficients"),
         tableOutput("model_coef_table")
@@ -332,7 +365,6 @@ ui <- page_navbar(
         p(class = "text-muted small mt-2",
           "Includes your submitted values, the direct (non-encrypted) computation, the homomorphic decrypted result, and the analyst's computation log.")
       ),
-      # Wide, tall, scrollable result panel
       tags$div(
         style = "max-height: 88vh; overflow-y: auto; padding-right: 8px;",
         card(
@@ -380,6 +412,10 @@ ui <- page_navbar(
       withMathJax(helpText("$$P(\\text{diabetes}) = \\sigma(z)$$")),
       p("where z is the GP-inspired linear predictor defined in the app. This guarantees a balanced, learnable dataset."),
       hr(),
+      h4("Model Training"),
+      p("A calibrated logistic regression is fit automatically when the app starts, so the demo is usable immediately.",
+        "You can regenerate data and retrain at any time from the Data & Model tab."),
+      hr(),
       h4("Limitations"),
       tags$ul(
         tags$li("Paillier supports addition only (not multiplication of two ciphertexts)."),
@@ -392,20 +428,34 @@ ui <- page_navbar(
 )
 
 # ------------------------------------------------------------
-# 6. SERVER
+# 8. SERVER
 # ------------------------------------------------------------
 server <- function(input, output, session) {
   
-  patients         <- reactiveVal(generate_patients(2000))
-  model_trained    <- reactiveVal(FALSE)
-  trained_model    <- reactiveVal(NULL)
-  test_data        <- reactiveVal(NULL)
+  # Start with the pre-trained model
+  patients         <- reactiveVal(initial_patients)
+  model_trained    <- reactiveVal(TRUE)
+  trained_model    <- reactiveVal(initial_trained$model)
+  test_data        <- reactiveVal(initial_trained$test_set)
+  train_data_val   <- reactiveVal(initial_trained$train_data)
+  
   encrypted_data   <- reactiveVal(NULL)
   sent_to_analyst  <- reactiveVal(FALSE)
   encrypted_result <- reactiveVal(NULL)
   result_ready     <- reactiveVal(FALSE)
   compute_log_text <- reactiveVal("Waiting for data...")
-  last_result      <- reactiveVal(NULL)   # for download
+  last_result      <- reactiveVal(NULL)
+  
+  # ---------- Status badge ----------
+  output$model_status_badge <- renderUI({
+    if (model_trained()) {
+      div(class = "alert alert-success py-2 px-3 mb-0",
+          icon("check-circle"), " Model is trained and ready.")
+    } else {
+      div(class = "alert alert-warning py-2 px-3 mb-0",
+          icon("exclamation-triangle"), " No model trained yet.")
+    }
+  })
   
   # ---------- Generate New Dataset ----------
   observeEvent(input$btn_generate, {
@@ -414,45 +464,37 @@ server <- function(input, output, session) {
     model_trained(FALSE)
     trained_model(NULL)
     test_data(NULL)
+    train_data_val(NULL)
     encrypted_data(NULL)
     sent_to_analyst(FALSE)
     encrypted_result(NULL)
     result_ready(FALSE)
     last_result(NULL)
-    showNotification(paste("Generated", n, "patients."), type = "message")
+    output$confusion_table <- renderTable(NULL)
+    showNotification(paste0("Generated ", n, " patients. Click 'Retrain Model' to fit on the new data."),
+                     type = "message", duration = 5)
   })
   
-  # ---------- Data Preview ----------
-  output$data_preview <- renderTable({
-    head(patients(), 10)
-  })
-  
-  # ---------- Train Model (with intercept calibration) ----------
+  # ---------- Retrain Model ----------
   observeEvent(input$btn_train, {
     df <- patients()
-    set.seed(123)
-    train_idx <- sample(1:nrow(df), 0.7 * nrow(df))
-    train_data <- df[train_idx, ]
-    test_set <- df[-train_idx, ]
-    test_data(test_set)
-    
-    model <- glm(diabetes ~ age + systolic_bp + sugar + bmi +
-                   smoker + alcohol + sport,
-                 data = train_data, family = binomial())
-    
-    mean_pred <- mean(predict(model, train_data, type = "response"))
-    obs_rate  <- mean(train_data$diabetes)
-    model$coefficients["(Intercept)"] <-
-      model$coefficients["(Intercept)"] +
-      log(obs_rate / (1 - obs_rate)) -
-      log(mean_pred / (1 - mean_pred))
-    
-    trained_model(model)
+    res <- train_calibrated_model(df)
+    trained_model(res$model)
+    test_data(res$test_set)
+    train_data_val(res$train_data)
     model_trained(TRUE)
     
-    pred_prob <- predict(model, test_set, type = "response")
+    # Reset downstream state so old ciphertext/result can't be reused
+    encrypted_data(NULL)
+    sent_to_analyst(FALSE)
+    encrypted_result(NULL)
+    result_ready(FALSE)
+    compute_log_text("Waiting for data...")
+    last_result(NULL)
+    
+    pred_prob <- predict(res$model, res$test_set, type = "response")
     pred_class <- ifelse(pred_prob > 0.5, 1, 0)
-    conf_mat <- table(Predicted = pred_class, Actual = test_set$diabetes)
+    conf_mat <- table(Predicted = pred_class, Actual = res$test_set$diabetes)
     
     output$confusion_table <- renderTable({
       df_cm <- as.data.frame.matrix(conf_mat)
@@ -460,7 +502,25 @@ server <- function(input, output, session) {
       df_cm[, c("Predicted", colnames(df_cm)[1:2])]
     })
     
-    showNotification("Model trained and calibrated successfully!", type = "message")
+    showNotification("Model retrained and calibrated successfully!", type = "message")
+  })
+  
+  # ---------- Populate confusion matrix on first render ----------
+  output$confusion_table <- renderTable({
+    req(model_trained(), trained_model(), test_data())
+    model <- trained_model()
+    test <- test_data()
+    pred_prob <- predict(model, test, type = "response")
+    pred_class <- ifelse(pred_prob > 0.5, 1, 0)
+    conf_mat <- table(Predicted = pred_class, Actual = test$diabetes)
+    df_cm <- as.data.frame.matrix(conf_mat)
+    df_cm$Predicted <- rownames(df_cm)
+    df_cm[, c("Predicted", colnames(df_cm)[1:2])]
+  })
+  
+  # ---------- Data Preview ----------
+  output$data_preview <- renderTable({
+    head(patients(), 10)
   })
   
   # ---------- Model Summary ----------
@@ -479,11 +539,11 @@ server <- function(input, output, session) {
     
     paste0(
       "Model: Logistic Regression (calibrated)\n",
-      "Training samples: ", nrow(patients()) - nrow(test), "\n",
+      "Training samples: ", nrow(train_data_val()), "\n",
       "Test samples: ", nrow(test), "\n",
       "Test Accuracy: ", round(accuracy * 100, 2), "%\n",
       "Approx. AUC: ", round(auc, 3), "\n",
-      "Positive rate (train): ", round(mean(patients()$diabetes) * 100, 1), "%"
+      "Positive rate (train): ", round(mean(train_data_val()$diabetes) * 100, 1), "%"
     )
   })
   
@@ -859,7 +919,6 @@ server <- function(input, output, session) {
       )
     })
     
-    # Store everything needed for the download
     last_result(list(
       timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
       submitted_values = data.frame(
@@ -938,6 +997,6 @@ server <- function(input, output, session) {
 }
 
 # ------------------------------------------------------------
-# 7. RUN APP
+# 9. RUN APP
 # ------------------------------------------------------------
 shinyApp(ui = ui, server = server)
