@@ -18,6 +18,7 @@ library(homomorpheR)
 library(gmp)
 library(ggplot2)
 library(thematic)
+library(plotly)
 
 thematic_shiny()
 
@@ -108,7 +109,6 @@ hom_add <- function(ct1, ct2) {
   pubkey$add(ct1, ct2)
 }
 
-# Scalar multiplication with safe negative handling.
 hom_scalar_mult <- function(ct, k) {
   k <- as.integer(k)
   if (k == 0) return(encrypt_int(0))
@@ -164,20 +164,70 @@ ui <- page_navbar(
           verbatimTextOutput("model_summary")
         )
       ),
-      card(
-        card_header("Raw Data — Faceted Distributions by Diabetes Status"),
-        p("Each panel shows the distribution of one feature, split by outcome."),
-        plotOutput("faceted_plot", height = "500px")
-      ),
       layout_column_wrap(
         width = 1/2,
         card(
           card_header("Feature Importance (Coefficients)"),
-          plotOutput("feature_plot", height = "300px")
+          plotlyOutput("feature_plot", height = "320px")
         ),
         card(
           card_header("Confusion Matrix (Test Set)"),
           tableOutput("confusion_table")
+        )
+      )
+    )
+  ),
+  
+  # ========== TAB 1b: EXPLORE DATA ==========
+  nav_panel(
+    "Explore Data",
+    icon = icon("magnifying-glass-chart"),
+    layout_sidebar(
+      sidebar = sidebar(
+        h4("Data Explorer"),
+        p("Explore how each clinical feature relates to diabetes risk."),
+        hr(),
+        selectInput("explore_feature", "Focus on feature:",
+                    choices = c("Age" = "age",
+                                "Systolic BP" = "systolic_bp",
+                                "Blood Sugar" = "sugar",
+                                "BMI" = "bmi"),
+                    selected = "sugar"),
+        radioButtons("explore_split", "Color by:",
+                     choices = c("Diabetes status" = "diabetes",
+                                 "Smoking" = "smoker",
+                                 "Sport" = "sport"),
+                     selected = "diabetes"),
+        hr(),
+        h5("Dataset Summary"),
+        tableOutput("explore_summary")
+      ),
+      layout_column_wrap(
+        width = 1,
+        card(
+          card_header("All Features — Distribution by Outcome"),
+          p("Each panel shows the full distribution of one feature, split by diabetes status.",
+            "Hover for counts; drag to zoom."),
+          plotlyOutput("explore_grid", height = "480px")
+        ),
+        layout_column_wrap(
+          width = 1/2,
+          card(
+            card_header("Focused Feature — Overlaid Distributions"),
+            p("The selected feature, overlaid by the chosen grouping."),
+            plotlyOutput("explore_focus", height = "380px")
+          ),
+          card(
+            card_header("Risk Gradient — Binned Diabetes Rate"),
+            p("Average diabetes rate within each bin of the selected feature.",
+              "Shows the direction and strength of the association."),
+            plotlyOutput("explore_risk", height = "380px")
+          )
+        ),
+        card(
+          card_header("Feature Correlation Matrix"),
+          p("Pairwise Pearson correlation across the seven clinical features and the outcome."),
+          plotlyOutput("explore_corr", height = "520px")
         )
       )
     )
@@ -363,29 +413,6 @@ server <- function(input, output, session) {
     head(patients(), 10)
   })
   
-  # ---------- Faceted Plot ----------
-  output$faceted_plot <- renderPlot({
-    df <- patients()
-    long <- rbind(
-      data.frame(diabetes = df$diabetes, feature = "Age", value = df$age),
-      data.frame(diabetes = df$diabetes, feature = "Systolic BP", value = df$systolic_bp),
-      data.frame(diabetes = df$diabetes, feature = "Blood Sugar", value = df$sugar),
-      data.frame(diabetes = df$diabetes, feature = "BMI", value = df$bmi)
-    )
-    long$diabetes <- factor(long$diabetes, labels = c("No Diabetes", "Diabetes"))
-    long$feature <- factor(long$feature,
-                           levels = c("Age", "Systolic BP", "Blood Sugar", "BMI"))
-    
-    ggplot(long, aes(x = value, fill = diabetes)) +
-      geom_histogram(alpha = 0.6, bins = 30, position = "identity") +
-      facet_wrap(~ feature, scales = "free", ncol = 2) +
-      scale_fill_manual(values = c("No Diabetes" = "#3498db", "Diabetes" = "#e74c3c")) +
-      labs(title = "Feature Distributions by Diabetes Status",
-           x = "Value", y = "Count", fill = NULL) +
-      theme_minimal(base_size = 13) +
-      theme(legend.position = "top")
-  })
-  
   # ---------- Train Model (with intercept calibration) ----------
   observeEvent(input$btn_train, {
     df <- patients()
@@ -458,24 +485,173 @@ server <- function(input, output, session) {
     )
   })
   
-  # ---------- Feature Plot ----------
-  output$feature_plot <- renderPlot({
+  # ---------- Feature Plot (plotly) ----------
+  output$feature_plot <- renderPlotly({
     req(model_trained())
     model <- trained_model()
     coefs <- coef(model)[-1]
     df <- data.frame(
       Feature = names(coefs),
-      Coefficient = coefs
+      Coefficient = coefs,
+      Direction = ifelse(coefs > 0, "Increases risk", "Decreases risk")
     )
     df$Feature <- factor(df$Feature, levels = df$Feature[order(abs(df$Coefficient))])
     
-    ggplot(df, aes(x = Feature, y = Coefficient, fill = Coefficient > 0)) +
+    p <- ggplot(df, aes(x = Feature, y = Coefficient, fill = Direction,
+                        text = paste0(Feature, "<br>Coefficient: ", round(Coefficient, 4)))) +
       geom_col() +
       coord_flip() +
-      scale_fill_manual(values = c("TRUE" = "#e74c3c", "FALSE" = "#3498db"),
-                        guide = "none") +
-      labs(title = "Model Coefficients", x = NULL, y = "Coefficient") +
-      theme_minimal(base_size = 12)
+      scale_fill_manual(values = c("Increases risk" = "#e74c3c",
+                                   "Decreases risk" = "#3498db")) +
+      labs(x = NULL, y = "Coefficient (log-odds)", fill = NULL) +
+      theme_minimal(base_size = 12) +
+      theme(legend.position = "top", panel.grid.minor = element_blank())
+    
+    ggplotly(p, tooltip = "text")
+  })
+  
+  # ---------- Explore Data: All Features Grid ----------
+  output$explore_grid <- renderPlotly({
+    df <- patients()
+    long <- rbind(
+      data.frame(diabetes = df$diabetes, feature = "Age",            value = df$age),
+      data.frame(diabetes = df$diabetes, feature = "Systolic BP",    value = df$systolic_bp),
+      data.frame(diabetes = df$diabetes, feature = "Blood Sugar",    value = df$sugar),
+      data.frame(diabetes = df$diabetes, feature = "BMI",            value = df$bmi)
+    )
+    long$diabetes <- factor(long$diabetes, labels = c("No Diabetes", "Diabetes"))
+    long$feature  <- factor(long$feature,
+                            levels = c("Age", "Systolic BP", "Blood Sugar", "BMI"))
+    
+    p <- ggplot(long, aes(x = value, fill = diabetes)) +
+      geom_histogram(alpha = 0.65, bins = 28, position = "identity",
+                     color = "white", linewidth = 0.2) +
+      facet_wrap(~ feature, scales = "free", ncol = 2) +
+      scale_fill_manual(values = c("No Diabetes" = "#3498db", "Diabetes" = "#e74c3c")) +
+      labs(x = NULL, y = "Count", fill = NULL) +
+      theme_minimal(base_size = 13) +
+      theme(legend.position = "top",
+            panel.grid.minor = element_blank(),
+            strip.text = element_text(face = "bold"))
+    
+    ggplotly(p, tooltip = c("x", "y", "fill")) |>
+      layout(margin = list(t = 30))
+  })
+  
+  # ---------- Explore Data: Focused Feature Overlay ----------
+  output$explore_focus <- renderPlotly({
+    df <- patients()
+    feat <- input$explore_feature
+    grp  <- input$explore_split
+    
+    d <- data.frame(value = df[[feat]], group = df[[grp]])
+    d$group <- factor(d$group)
+    
+    if (grp == "diabetes") {
+      levels(d$group) <- c("No Diabetes", "Diabetes")
+      pal <- c("No Diabetes" = "#3498db", "Diabetes" = "#e74c3c")
+    } else if (grp == "smoker") {
+      levels(d$group) <- c("Non-smoker", "Smoker")
+      pal <- c("Non-smoker" = "#16a085", "Smoker" = "#e67e22")
+    } else {
+      levels(d$group) <- c("No Sport", "Sport")
+      pal <- c("No Sport" = "#8e44ad", "Sport" = "#27ae60")
+    }
+    
+    p <- ggplot(d, aes(x = value, fill = group)) +
+      geom_histogram(alpha = 0.6, bins = 30, position = "identity",
+                     color = "white", linewidth = 0.2) +
+      scale_fill_manual(values = pal) +
+      labs(x = tools::toTitleCase(gsub("_", " ", feat)), y = "Count", fill = NULL) +
+      theme_minimal(base_size = 13) +
+      theme(legend.position = "top",
+            panel.grid.minor = element_blank())
+    
+    ggplotly(p, tooltip = c("x", "y", "fill"))
+  })
+  
+  # ---------- Explore Data: Binned Risk Gradient ----------
+  output$explore_risk <- renderPlotly({
+    df <- patients()
+    feat <- input$explore_feature
+    
+    n_bins <- 12
+    breaks <- quantile(df[[feat]], probs = seq(0, 1, length.out = n_bins + 1),
+                       na.rm = TRUE)
+    breaks <- unique(breaks)
+    if (length(breaks) < 3) return(plotly_empty())
+    
+    df$bin <- cut(df[[feat]], breaks = breaks, include.lowest = TRUE,
+                  labels = FALSE)
+    agg <- aggregate(diabetes ~ bin, data = df, FUN = mean)
+    agg$mid <- tapply(df[[feat]], df$bin, median, na.rm = TRUE)[as.character(agg$bin)]
+    agg$n   <- tapply(df[[feat]], df$bin, length)[as.character(agg$bin)]
+    
+    p <- ggplot(agg, aes(x = mid, y = diabetes * 100,
+                         text = paste0("Bin midpoint: ", round(mid, 1),
+                                       "<br>Diabetes rate: ", round(diabetes * 100, 1), "%",
+                                       "<br>N: ", n))) +
+      geom_line(color = "#2c3e50", linewidth = 1) +
+      geom_point(color = "#e74c3c", size = 3) +
+      scale_y_continuous(limits = c(0, NA),
+                         labels = function(x) paste0(x, "%")) +
+      labs(x = tools::toTitleCase(gsub("_", " ", feat)),
+           y = "Diabetes rate") +
+      theme_minimal(base_size = 13) +
+      theme(panel.grid.minor = element_blank())
+    
+    ggplotly(p, tooltip = "text")
+  })
+  
+  # ---------- Explore Data: Correlation Matrix ----------
+  output$explore_corr <- renderPlotly({
+    df <- patients()
+    cols <- c("age", "systolic_bp", "sugar", "bmi",
+              "smoker", "alcohol", "sport", "diabetes")
+    cm <- cor(df[, cols], use = "pairwise.complete.obs")
+    
+    cm_long <- expand.grid(Var1 = rownames(cm), Var2 = colnames(cm),
+                           stringsAsFactors = FALSE)
+    cm_long$value <- as.vector(cm)
+    cm_long$Var1 <- factor(cm_long$Var1, levels = cols)
+    cm_long$Var2 <- factor(cm_long$Var2, levels = rev(cols))
+    
+    p <- ggplot(cm_long, aes(x = Var1, y = Var2, fill = value,
+                             text = paste0(Var1, " vs ", Var2,
+                                           "<br>r = ", round(value, 3)))) +
+      geom_tile(color = "white") +
+      geom_text(aes(label = round(value, 2)),
+                size = 3.2,
+                color = ifelse(abs(cm_long$value) > 0.4, "white", "grey20")) +
+      scale_fill_gradient2(low = "#3498db", mid = "white", high = "#e74c3c",
+                           midpoint = 0, limits = c(-1, 1)) +
+      labs(x = NULL, y = NULL, fill = "r") +
+      theme_minimal(base_size = 12) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            panel.grid = element_blank())
+    
+    ggplotly(p, tooltip = "text") |>
+      layout(margin = list(l = 80, b = 80))
+  })
+  
+  # ---------- Explore Data: Summary Table ----------
+  output$explore_summary <- renderTable({
+    df <- patients()
+    data.frame(
+      Feature = c("Age", "Systolic BP", "Sugar", "BMI", "Smoker", "Alcohol", "Sport"),
+      Mean    = c(mean(df$age), mean(df$systolic_bp), mean(df$sugar),
+                  mean(df$bmi), mean(df$smoker), mean(df$alcohol), mean(df$sport)),
+      SD      = c(sd(df$age), sd(df$systolic_bp), sd(df$sugar),
+                  sd(df$bmi), NA, NA, NA),
+      Min     = c(min(df$age), min(df$systolic_bp), min(df$sugar),
+                  min(df$bmi), 0, 0, 0),
+      Max     = c(max(df$age), max(df$systolic_bp), max(df$sugar),
+                  max(df$bmi), 1, 1, 1)
+    ) |>
+      transform(
+        Mean = round(Mean, 1),
+        SD   = ifelse(is.na(SD), "—", as.character(round(SD, 1)))
+      )
   })
   
   # ---------- Patient Summary ----------
@@ -591,11 +767,9 @@ server <- function(input, output, session) {
     
     scale_factor <- 1000
     
-    # Decrypt raw scaled integer in ciphertext space (mod n)
-    raw <- privkey$decrypt(encrypted_result())   # bigz in [0, n)
-    n_mod <- pubkey$n                            # bigz modulus
+    raw <- privkey$decrypt(encrypted_result())
+    n_mod <- pubkey$n
     
-    # Reconstruct signed value: if raw > n/2, it represents a negative number
     half_n <- n_mod %/% 2
     signed_scaled <- if (as.bigz(raw) > half_n) {
       as.bigz(raw) - n_mod
@@ -603,12 +777,10 @@ server <- function(input, output, session) {
       as.bigz(raw)
     }
     
-    # Convert to numeric and apply scale
     linear_pred <- as.numeric(signed_scaled) / scale_factor
     risk_prob   <- 1 / (1 + exp(-linear_pred))
     pct         <- round(risk_prob * 100, 1)
     
-    # Risk categorisation (guaranteed non-NA now)
     if (pct < 20) {
       lbl <- "Low risk";      theme <- "success"; icn <- "check-circle"
     } else if (pct < 50) {
@@ -629,7 +801,6 @@ server <- function(input, output, session) {
       )
     })
     
-    # Verification: direct computation
     values <- c(
       "(Intercept)" = 1,
       age = as.numeric(input$in_age),
